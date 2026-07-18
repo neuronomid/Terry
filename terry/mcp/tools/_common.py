@@ -130,8 +130,7 @@ def cancel_session(session_id, kind, new_status="canceled"):
     s = ctx.sessions.get(session_id)
     if s is None:
         return {"error": "not_found", "session_id": session_id}
-    ctx.sessions.set_status(session_id, new_status)
-    return {"status": new_status, "session_id": session_id}
+    return ctx.runner.cancel(session_id, new_status)
 
 
 def purge_sessions(kind, days_old=None):

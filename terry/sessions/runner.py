@@ -19,6 +19,7 @@ class Runner:
     def __init__(self, ctx):
         self.ctx = ctx
         self._threads = {}
+        self._canceled = set()
 
     # ------------------------------------------------------------------ public
     def run(self, sid):
@@ -27,12 +28,19 @@ class Runner:
             raise KeyError(sid)
         if session["status"] == "running":
             return {"status": "running", "session_id": sid}
+        self._canceled.discard(sid)
         self.ctx.sessions.set_status(sid, "running")
         self.ctx.sessions.set_progress(sid, 0)
         t = threading.Thread(target=self._dispatch, args=(sid,), daemon=True)
         self._threads[sid] = t
         t.start()
         return {"status": "started", "session_id": sid}
+
+    def cancel(self, sid, status="canceled"):
+        """Mark a run canceled so a worker cannot overwrite the terminal state on completion."""
+        self._canceled.add(sid)
+        self.ctx.sessions.set_status(sid, status)
+        return {"status": status, "session_id": sid}
 
     # ------------------------------------------------------------------ dispatch
     def _dispatch(self, sid):
@@ -50,12 +58,18 @@ class Runner:
                 results = self._run_optimization(sid, state)
             else:
                 raise ValueError(f"Unknown kind {kind}")
+            if sid in self._canceled:
+                return
             results["dashboard_url"] = self.ctx.write_report(sid, kind, state, results)
             self.ctx.sessions.set_results(sid, results, status="finished")
         except MissingCandles as e:
+            if sid in self._canceled:
+                return
             self.ctx.sessions.set_results(
                 sid, {"error": "missing_candles", "message": str(e)}, status="stopped")
         except Exception as e:
+            if sid in self._canceled:
+                return
             self.ctx.sessions.set_results(
                 sid, {"error": type(e).__name__, "message": str(e)}, status="stopped")
 

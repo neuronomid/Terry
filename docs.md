@@ -11,6 +11,9 @@ backtest, and stress-test strategies locally. Free Binance data, SQLite storage,
 ## 1. Start (one command)
     ./run.sh      # venv+deps+init+serve (--port 9030 to change port)
 
+Browser dashboard (separate local process):
+    .venv/bin/python -m terry dashboard    # http://127.0.0.1:9020
+
 ## 2. Connect an agent
     claude mcp add --transport http terry http://localhost:9021/mcp      # then /mcp to verify
 Any MCP client: add an HTTP server at http://localhost:9021/mcp (see .mcp.json). Agents also read AGENTS.md.
@@ -184,13 +187,16 @@ HTTP 451 -> use "Binance US Spot" or a VPN.
 ## 13. Fidelity vs Jesse
 Validated back-to-back: 174 indicators numerically identical (171/171 within 1e-6); identical
 long+short strategy over identical candles -> 19/19 trades match (entry/exit prices, timestamps,
-counts, streaks, holding periods). Same 44 metric keys/definitions. Minor known gap: cumulative
-money values may differ a fraction of a percent (Terry's default size_to_qty uses a slightly
-simpler fee term than Jesse's 1 - fee_rate*3 + floor); trade entries/exits unaffected. Not built
-(by design): live/paper trading, the web dashboard (Terry emits HTML reports), Ray parallelism.
+counts, streaks, holding periods). Same 44 metric keys/definitions and the same 58 MCP tool names.
+Terry also provides a responsive local browser dashboard on port 9020 with strategy editing,
+candle imports, session history, backtest/optimization/Monte-Carlo/Rule-Test execution, reports,
+JSON/CSV exports, indicators, and saved settings. Minor known gap: cumulative money values may
+differ a fraction of a percent (Terry's default size_to_qty uses a slightly simpler fee term than
+Jesse's 1 - fee_rate*3 + floor); trade entries/exits are unaffected. Not built (by design):
+live/paper trading and Ray parallelism.
 
 ## 14. Not available
-Live/paper trading (simulation only). Gmail/Calendar/Drive MCP connectors are unrelated to Terry and
+Live/paper trading (simulation only; the dashboard labels it unavailable). Gmail/Calendar/Drive MCP connectors are unrelated to Terry and
 require the user to authorize them in their own client.
 
 ## 15. Keep this file current

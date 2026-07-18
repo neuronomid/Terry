@@ -1,8 +1,18 @@
 """Strategy file tools: create / read / write strategy source in strategies/<name>/__init__.py."""
 import os
+import re
 
 from ...context import get_context
 from ...loader import load_strategy_class
+
+
+_VALID_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
+
+
+def _validate_name(name):
+    if not _VALID_NAME.fullmatch(name or ""):
+        return "Strategy names must start with a letter and contain only letters, numbers, or underscores."
+    return None
 
 
 def _validate(name):
@@ -23,6 +33,9 @@ def register_strategy_tools(mcp):
             name: The strategy class/folder name (e.g. "SmaCross").
             content: Complete Python source defining `class <name>(Strategy)`.
         """
+        name_error = _validate_name(name)
+        if name_error:
+            return {"error": "invalid_name", "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
         if os.path.exists(path):
@@ -40,6 +53,9 @@ def register_strategy_tools(mcp):
     @mcp.tool()
     def read_strategy(name: str) -> dict:
         """Read the source of strategies/<name>/__init__.py."""
+        name_error = _validate_name(name)
+        if name_error:
+            return {"error": "invalid_name", "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
         if not os.path.exists(path):
@@ -50,6 +66,9 @@ def register_strategy_tools(mcp):
     @mcp.tool()
     def write_strategy(name: str, content: str) -> dict:
         """Overwrite (or create) strategies/<name>/__init__.py with new source."""
+        name_error = _validate_name(name)
+        if name_error:
+            return {"error": "invalid_name", "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
         os.makedirs(os.path.dirname(path), exist_ok=True)

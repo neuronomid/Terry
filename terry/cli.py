@@ -11,6 +11,11 @@ def _cmd_serve(args):
     run(port=args.port, project_root=args.project)
 
 
+def _cmd_dashboard(args):
+    from .dashboard import run
+    run(port=args.port, host=args.host, project_root=args.project)
+
+
 def _cmd_init(args):
     root = os.path.abspath(args.project or os.getcwd())
     strategies = os.path.join(root, "strategies")
@@ -85,6 +90,12 @@ def main(argv=None):
     s.add_argument("--port", type=int, default=9021)
     s.add_argument("--project", type=str, default=None)
     s.set_defaults(func=_cmd_serve)
+
+    dashboard = sub.add_parser("dashboard", help="Start the local browser dashboard")
+    dashboard.add_argument("--port", type=int, default=9020)
+    dashboard.add_argument("--host", type=str, default="127.0.0.1")
+    dashboard.add_argument("--project", type=str, default=None)
+    dashboard.set_defaults(func=_cmd_dashboard)
 
     i = sub.add_parser("init", help="Initialize a Terry project in the current directory")
     i.add_argument("--project", type=str, default=None)

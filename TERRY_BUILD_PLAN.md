@@ -36,13 +36,13 @@ iterates with small changes, runs Monte Carlo, and writes a Markdown report — 
 |---|---|---|
 | Nature | Framework + SaaS | **Independent, self-contained clone** you own |
 | Storage | PostgreSQL + Redis | **SQLite** (zero-config, local, free) |
-| Process model | Dashboard :9000 + MCP :9002 (HTTP) | **Single in-process MCP server**; tools call the engine directly |
+| Process model | Dashboard :9000 + MCP :9002 (HTTP) | **Local FastAPI dashboard :9020 + MCP :9021**; both call the same engine directly |
 | Transport | FastMCP streamable-http :9002 | **Same** (FastMCP streamable-http, default port 9021) |
 | Tool surface | ~56 tools, `run_*` credit-gated | **Same tool names/semantics, ungated (free/unlimited)** |
 | Strategy API | `Strategy` base class | **Same API** (drop-in compatible source) |
 | Metrics | 44-key dict | **Same keys/definitions** (validated vs Jesse) |
 | Data source | Binance/Bybit/… drivers | **Binance public REST** (no API key) + pluggable |
-| "Dashboard URL" | live Vue dashboard | **self-contained HTML report** per session (file URL) |
+| "Dashboard URL" | live Vue dashboard | **responsive local dashboard + self-contained HTML report** per session |
 | Live trading | paid plugin | **out of scope** (documented as future; safety) |
 | Optimization | Optuna + Ray | **Optuna** (random/TPE), in-process multiprocessing |
 
@@ -124,6 +124,6 @@ tests/                 unit + end-to-end MCP tests
 
 ## 6. Out of scope (documented, not built)
 
-Real live/paper trading against exchanges; the full Vue dashboard; ML pipeline;
+Real live/paper trading against exchanges; ML pipeline;
 100% of Jesse's 300+ indicators (Terry ships the common ~40, easily extended);
 multi-process Ray cluster (Terry uses local multiprocessing/threads).

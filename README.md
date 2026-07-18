@@ -45,6 +45,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m terry doctor          # check the environment
 .venv/bin/python -m terry serve           # start the MCP server on :9021
+.venv/bin/python -m terry dashboard       # start the local dashboard on :9020
 ```
 
 Or start it with Docker:
@@ -53,8 +54,8 @@ Or start it with Docker:
 docker compose up --build
 ```
 
-The MCP endpoint is `http://localhost:9021/mcp` by default. Change
-`TERRY_PORT` in `.env` if that port is already in use.
+The MCP endpoint is `http://localhost:9021/mcp` by default and the dashboard is at
+`http://127.0.0.1:9020`. Pass `--port` to either command if a port is already in use.
 
 Connect Claude Code:
 
