@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import inspect
 import importlib
+import asyncio
+import json
 import math
 import threading
+import time
 import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
@@ -21,13 +24,20 @@ from terry.data.storage import CandleDB
 from terry.factories import candles_from_close_prices
 from terry.mcp.resources import _RESOURCES
 from terry.context import TerryContext
+from terry.context import set_context
+from terry.data.importer import Importer
 from terry.enums import order_statuses
 from terry.models import Order
+from terry.loader import load_strategy_from_source
+from terry.mcp.server import build_server
+from terry.mcp.tools import _common as session_tools
 from terry.research.ml import load_ml_model, train_model
 from terry.research.monte_carlo import monte_carlo_candles, monte_carlo_trades
 from terry.research.optimize import _score, optimize, print_optimize_summary
 from terry.research.significance import plot_significance_test, rule_significance_test
 from terry.strategy import Strategy, cached
+import terry.testing_utils as testing_utils
+from terry.testing_utils import single_route_backtest
 
 
 def test_jesse_utility_compatibility():
@@ -65,6 +75,173 @@ def test_cached_decorator_caches_for_one_strategy_cycle():
     assert strategy.calls == 1
     strategy._cache = {}
     assert strategy.value(2) == 4
+
+
+def test_unchanged_jesse_strategy_imports_run_with_terry_testing_helper():
+    assert list(inspect.signature(
+        testing_utils.get_btc_and_eth_candles).parameters) == []
+    assert list(inspect.signature(testing_utils.single_route_backtest).parameters)[:8] == [
+        "strategy_name", "is_futures_trading", "leverage", "leverage_mode",
+        "trend", "fee", "candles_count", "timeframe",
+    ]
+    source = '''from jesse.strategies import Strategy
+import jesse.indicators as ta
+from jesse import utils
+
+class JesseSourceStrategy(Strategy):
+    def should_long(self):
+        return self.price == 10 and ta.sma(self.candles, 2) > 0
+    def should_short(self):
+        return False
+    def go_long(self):
+        self.buy = utils.size_to_qty(10, self.price), self.price
+    def on_open_position(self, order):
+        self.take_profit = self.position.qty, 12
+    def on_close_position(self, order, closed_trade):
+        assert closed_trade.entry_price == 10
+        assert closed_trade.exit_price == 12
+'''
+    strategy_class = load_strategy_from_source("JesseSourceStrategy", source)
+    result = single_route_backtest(
+        "JesseSourceStrategy",
+        strategy_classes={"JesseSourceStrategy": strategy_class},
+    )
+    assert result["metrics"]["total"] == 1
+    assert result["trades"][0]["entry_price"] == 10
+    assert result["trades"][0]["exit_price"] == 12
+
+
+def test_importer_can_retry_with_the_same_jesse_import_id(tmp_path, monkeypatch):
+    module = importlib.import_module("terry.data.importer")
+
+    def fake_fetch(_exchange, _symbol, start_ts, finish_ts, **_kwargs):
+        return np.array([[max(start_ts, finish_ts - 60_000), 1, 1, 1, 1, 1]],
+                        dtype=float)
+
+    monkeypatch.setattr(module, "fetch_1m_range", fake_fetch)
+    importer = Importer(CandleDB(tmp_path / "candles.db"))
+    identifier = "same-import-id"
+    assert importer.start_import(
+        "Binance Spot", "BTC-USDT", "2024-01-01", "2024-01-02",
+        import_id=identifier) == identifier
+    deadline = time.monotonic() + 2
+    while importer.get_status(identifier)["status"] not in {"finished", "error"}:
+        assert time.monotonic() < deadline
+        time.sleep(.005)
+    assert importer.get_status(identifier)["status"] == "finished"
+    assert importer.start_import(
+        "Binance Spot", "BTC-USDT", "2024-01-01", "2024-01-02",
+        import_id=identifier) == identifier
+    deadline = time.monotonic() + 2
+    while importer.get_status(identifier)["status"] not in {"finished", "error"}:
+        assert time.monotonic() < deadline
+        time.sleep(.005)
+    assert importer.get_status(identifier)["status"] == "finished"
+
+
+def test_mcp_session_envelopes_notes_snapshots_and_filters(tmp_path):
+    strategy_path = tmp_path / "strategies" / "EnvelopeStrategy" / "__init__.py"
+    strategy_path.parent.mkdir(parents=True)
+    strategy_path.write_text(
+        "from jesse.strategies import Strategy\n"
+        "class EnvelopeStrategy(Strategy):\n"
+        "    def should_long(self): return False\n"
+        "    def go_long(self): pass\n",
+        encoding="utf-8",
+    )
+    ctx = set_context(TerryContext(str(tmp_path)))
+    state = {
+        "strategy": "EnvelopeStrategy", "exchange": "Binance Spot",
+        "symbol": "BTC-USDT", "timeframe": "1h",
+        "start_date": "2024-01-01", "finish_date": "2024-02-01",
+    }
+    draft = session_tools.create_draft(
+        "backtest", state, title="Envelope audit", description="Original note")
+    assert draft["status"] == "success"
+    assert draft["session_status"] == "draft"
+    assert draft["backtest_id"] == draft["session_id"]
+    assert draft["draft_state"]["form"]["routes"][0]["strategy"] == "EnvelopeStrategy"
+    assert draft["draft_state"]["results"]["selectedRoute"]["symbol"] == "BTC-USDT"
+    assert draft["draft_state"]["results"]["logsModal"] is False
+    assert draft["notes"]["title"] == "MCP Backtest: Envelope audit"
+    assert draft["notes"]["strategy_codes_captured"] == 1
+    assert draft["dashboard_url"].endswith(f'{draft["session_id"]}.html')
+
+    significance_draft = session_tools.create_draft(
+        "significance_test", state, title="Signal audit")
+    assert significance_draft["draft_state"]["form"]["id"] == (
+        significance_draft["session_id"])
+    assert significance_draft["draft_state"]["results"] == {
+        "alert": {"message": "", "type": ""}}
+    significance_session = session_tools.get_session(
+        significance_draft["session_id"])
+    assert significance_session["data"]["session"]["state"]["form"]["id"] == (
+        significance_draft["session_id"])
+
+    updated = session_tools.update_notes(
+        draft["session_id"], title="Filtered title", description="Conclusion",
+        strategy_codes=json.dumps({"Binance Spot-BTC-USDT": "snapshot"}))
+    assert updated["status"] == "success"
+    assert updated["strategy_code_keys"] == ["Binance Spot-BTC-USDT"]
+    listed = session_tools.list_sessions(
+        "backtest", limit=10, offset=0, title_search="filtered",
+        status_filter="draft")
+    assert listed["status"] == "success" and listed["count"] == 1
+    session = session_tools.get_session(draft["session_id"])
+    assert session["error"] is None
+    assert session["data"]["session"]["state"]["form"]["routes"][0]["symbol"] == (
+        "BTC-USDT")
+    assert ctx.sessions.get(draft["session_id"])["notes_metadata"]["description"] == "Conclusion"
+
+
+def test_mcp_schemas_and_basic_results_follow_jesse_contract(tmp_path):
+    async def exercise():
+        mcp = build_server(project_root=str(tmp_path))
+        tools = await mcp.list_tools()
+        schemas = {tool.name: list(tool.inputSchema["properties"])
+                   for tool in tools}
+        assert schemas["create_backtest_draft"][:17] == [
+            "exchange", "routes", "data_routes", "start_date", "finish_date",
+            "debug_mode", "export_csv", "export_json", "export_chart",
+            "export_tradingview", "fast_mode", "benchmark", "title",
+            "description", "strategy_summary", "change_summary", "rationale",
+        ]
+        assert schemas["create_optimization_draft"][:19] == [
+            "exchange", "routes", "data_routes", "training_start_date",
+            "training_finish_date", "testing_start_date", "testing_finish_date",
+            "optimal_total", "objective_function", "trials",
+            "best_candidates_count", "warm_up_candles", "fast_mode", "cpu_cores",
+            "title", "description", "strategy_summary", "hypothesis", "rationale",
+        ]
+        for name in (
+                "get_backtest_sessions", "get_significance_test_sessions",
+                "get_monte_carlo_sessions", "get_optimization_sessions"):
+            assert schemas[name] == [
+                "limit", "offset", "title_search", "status_filter", "date_filter"]
+        assert schemas["import_candles"][:4] == [
+            "exchange", "symbol", "start_date", "import_id"]
+        for name in (
+                "update_backtest_notes", "update_significance_test_notes",
+                "update_monte_carlo_notes", "update_optimization_notes"):
+            assert schemas[name][:4] == [
+                "session_id", "title", "description", "strategy_codes"]
+
+        def decode(blocks):
+            return json.loads(blocks[0].text)
+
+        greeting = decode(await mcp.call_tool("greet_user", {"name": "Ada"}))
+        assert greeting == {
+            **greeting, "status": "success", "action": "greeting", "user_name": "Ada"}
+        config = decode(await mcp.call_tool("get_config", {}))
+        assert config["status"] == "success" and config["config"]["fee"] == config["fee"]
+        indicators = decode(await mcp.call_tool("list_indicators", {}))
+        assert indicators["status"] == "success" and indicators["count"] == 174
+        details = decode(await mcp.call_tool(
+            "get_indicator_details", {"indicator_name": "sma"}))
+        assert details["status"] == "success"
+        assert isinstance(details["parameters"], dict)
+
+    asyncio.run(exercise())
 
 
 def test_candle_pipelines_preserve_valid_ohlc():

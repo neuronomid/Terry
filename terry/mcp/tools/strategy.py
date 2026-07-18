@@ -35,47 +35,75 @@ def register_strategy_tools(mcp):
         """
         name_error = _validate_name(name)
         if name_error:
-            return {"error": "invalid_name", "message": name_error}
+            return {"status": "error", "action": "strategy_creation_failed",
+                    "error": "invalid_name", "error_type": "validation_error",
+                    "strategy_name": name, "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
         if os.path.exists(path):
-            return {"error": "exists", "message": f'Strategy "{name}" already exists. Use write_strategy to overwrite.'}
+            return {"status": "error", "action": "strategy_creation_failed",
+                    "error": "exists", "error_type": "strategy_exists",
+                    "strategy_name": name,
+                    "message": f'Strategy "{name}" already exists. Use write_strategy to overwrite.'}
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
         err = _validate(name)
         if err:
-            return {"status": "created_with_errors", "name": name, "path": path,
+            return {"status": "error", "action": "strategy_population_failed",
+                    "error": "invalid_strategy", "error_type": "write_failed",
+                    "name": name, "strategy_name": name, "path": path,
+                    "creation_success": True,
                     "validation_error": err,
                     "message": "File written but it does not import cleanly — fix and call write_strategy."}
-        return {"status": "created", "name": name, "path": path}
+        return {"status": "success", "action": "strategy_created_and_populated",
+                "session_status": "created", "name": name, "strategy_name": name,
+                "path": path,
+                "message": f"Strategy '{name}' created and populated successfully"}
 
     @mcp.tool()
     def read_strategy(name: str) -> dict:
         """Read the source of strategies/<name>/__init__.py."""
         name_error = _validate_name(name)
         if name_error:
-            return {"error": "invalid_name", "message": name_error}
+            return {"status": "error", "action": "strategy_read_failed",
+                    "error": "invalid_name", "error_type": "validation_error",
+                    "strategy_name": name, "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
         if not os.path.exists(path):
-            return {"error": "not_found", "message": f'Strategy "{name}" not found.'}
+            return {"status": "error", "action": "strategy_read_failed",
+                    "error": "not_found", "error_type": "strategy_not_found",
+                    "strategy_name": name, "message": f'Strategy "{name}" not found.'}
         with open(path) as f:
-            return {"name": name, "path": path, "content": f.read()}
+            return {"status": "success", "action": "strategy_read",
+                    "name": name, "strategy_name": name, "path": path,
+                    "content": f.read(),
+                    "message": f"Strategy '{name}' content read successfully"}
 
     @mcp.tool()
     def write_strategy(name: str, content: str) -> dict:
-        """Overwrite (or create) strategies/<name>/__init__.py with new source."""
+        """Overwrite an existing strategies/<name>/__init__.py with new source."""
         name_error = _validate_name(name)
         if name_error:
-            return {"error": "invalid_name", "message": name_error}
+            return {"status": "error", "action": "strategy_write_failed",
+                    "error": "invalid_name", "error_type": "validation_error",
+                    "strategy_name": name, "message": name_error}
         ctx = get_context()
         path = os.path.join(ctx.strategies_dir, name, "__init__.py")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            return {"status": "error", "action": "strategy_write_failed",
+                    "error": "not_found", "error_type": "strategy_not_found",
+                    "strategy_name": name, "message": f'Strategy "{name}" not found.'}
         with open(path, "w") as f:
             f.write(content)
         err = _validate(name)
         if err:
-            return {"status": "written_with_errors", "name": name, "path": path,
-                    "validation_error": err}
-        return {"status": "written", "name": name, "path": path}
+            return {"status": "error", "action": "strategy_write_failed",
+                    "error": "invalid_strategy", "error_type": "write_failed",
+                    "name": name, "strategy_name": name, "path": path,
+                    "validation_error": err, "message": err}
+        return {"status": "success", "action": "strategy_updated",
+                "session_status": "written", "name": name, "strategy_name": name,
+                "path": path,
+                "message": f"Strategy '{name}' content updated successfully"}

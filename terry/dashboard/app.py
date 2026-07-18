@@ -228,6 +228,31 @@ def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _session_notes_metadata(ctx: TerryContext, kind: str, state: dict[str, Any],
+                            title: str | None, description: str | None) -> dict[str, Any]:
+    routes = state.get("routes") or [{
+        "exchange": state["exchange"], "strategy": state["strategy"],
+        "symbol": state["symbol"], "timeframe": state["timeframe"],
+    }]
+    primary = routes[0]
+    default_title = (
+        f'{kind.replace("_", " ").title()}: {primary["strategy"]} on '
+        f'{primary["symbol"]} {primary["timeframe"]}')
+    default_description = (
+        f'{kind.replace("_", " ").title()} for {len(routes)} trading route(s) '
+        f'from {state["start_date"]} to {state["finish_date"]} on {state["exchange"]}.')
+    codes = {}
+    for route in routes:
+        path = _strategy_path(ctx, route["strategy"])
+        try:
+            codes[f'{route["exchange"]}-{route["symbol"]}'] = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return {"title": title or default_title,
+            "description": description or default_description,
+            "strategy_codes": codes}
+
+
 def _clean_json(value: Any) -> Any:
     """Make engine results safe for strict JSON clients (NaN/Inf become null)."""
     if isinstance(value, float):
@@ -248,7 +273,8 @@ def _session_list(ctx: TerryContext, kind: str, limit: int, offset: int, query: 
     query = (query or "").strip().lower()
     if query:
         rows = [row for row in rows if query in " ".join(map(str, (
-            row["id"], row["state"].get("strategy", ""), row["state"].get("symbol", ""), row["notes"] or ""))).lower()]
+            row["id"], row["state"].get("strategy", ""), row["state"].get("symbol", ""),
+            (row.get("notes_metadata") or {}).get("title", ""), row["notes"] or ""))).lower()]
     if status:
         rows = [row for row in rows if row["status"] == status]
     total = len(rows)
@@ -311,6 +337,7 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         raise _error(404, "Unknown research mode.", "unknown_mode")
     allowed = {"strategy", "exchange", "symbol", "timeframe", "routes", "data_routes",
                "start_date", "finish_date", "config", "hyperparameters", "notes",
+               "title", "description",
                "cpu_cores", "start"}
     allowed |= {
         "significance_test": {"n_simulations", "random_seed", "hypothesis", "rationale"},
@@ -324,10 +351,13 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
     unknown = set(payload) - allowed
     if unknown:
         raise _error(422, f"Unknown session field(s): {', '.join(sorted(unknown))}.")
-    for field in ("notes", "hypothesis", "rationale"):
+    for field in ("notes", "title", "description", "hypothesis", "rationale"):
         if field in payload and payload[field] is not None and not isinstance(payload[field], str):
             raise _error(422, f"{field} must be text.")
-    notes = payload.get("notes") or ""
+    title = payload.get("title") or ""
+    if len(title) > 160:
+        raise _error(422, "title cannot exceed 160 characters.")
+    notes = payload.get("description") or payload.get("notes") or ""
     if len(notes) > 20_000:
         raise _error(422, "notes cannot exceed 20,000 characters.")
     state = _base_state(ctx, payload)
@@ -397,7 +427,9 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         }.items():
             state[field] = _boolean(payload.get(field, default), field)
     start = _boolean(payload.get("start", True), "start")
-    sid = ctx.sessions.create(kind, state, notes=notes)
+    metadata = _session_notes_metadata(ctx, kind, state, title or None, notes or None)
+    sid = ctx.sessions.create(
+        kind, state, notes=metadata["description"], notes_metadata=metadata)
     session = ctx.sessions.get(sid)
     if start:
         ctx.runner.run(sid)
@@ -716,14 +748,24 @@ def create_app(project_root: str | None = None) -> FastAPI:
         session = ctx.sessions.get(session_id)
         if session is None:
             raise _error(404, "Session was not found.", "not_found")
-        unknown = set(payload) - {"notes"}
+        unknown = set(payload) - {"notes", "title", "description"}
         if unknown:
             raise _error(422, f"Unknown session field(s): {', '.join(sorted(unknown))}.")
-        if "notes" in payload:
-            notes = str(payload["notes"] or "")
+        if "title" in payload and len(str(payload["title"] or "")) > 160:
+            raise _error(422, "title cannot exceed 160 characters.")
+        note_value = payload.get("description", payload.get("notes"))
+        if note_value is not None:
+            notes = str(note_value or "")
             if len(notes) > 20_000:
                 raise _error(422, "notes cannot exceed 20,000 characters.")
-            ctx.sessions.update_notes(session_id, notes)
+        else:
+            notes = session["notes"] or ""
+        metadata = dict(session.get("notes_metadata") or {})
+        if "title" in payload:
+            metadata["title"] = str(payload["title"] or "")
+        if note_value is not None:
+            metadata["description"] = notes
+        ctx.sessions.update_notes_metadata(session_id, metadata, notes=notes)
         return _session_payload(ctx.sessions.get(session_id))
 
     @app.delete("/api/session/{session_id}")

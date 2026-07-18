@@ -70,6 +70,7 @@ terry/
     metrics.py         metrics computation (44 keys, matches Jesse)
   strategy.py          Strategy base class (the developer API)
   loader.py            load strategy class from strategies/<Name>/__init__.py
+  testing_utils.py     deterministic Jesse-compatible strategy test helpers
   data/
     binance.py         public candle-driver registry (keeps legacy module name)
     storage.py         SQLite candle store (dedup, coverage queries)
@@ -97,6 +98,8 @@ terry/
 strategies/            user strategies (created via MCP tools)
 storage/               candles.db, sessions.db, reports/
 AGENTS.md              canonical agent prompt (adapted from Jesse's)
+.claude/skills/        canonical project-level Terry agent skills
+.agents/skills         Codex discovery link to the canonical skills
 terry (CLI)            `terry serve` starts the MCP server; `terry init`, `terry doctor`
 tests/                 unit + end-to-end MCP tests
 ```
@@ -115,6 +118,8 @@ tests/                 unit + end-to-end MCP tests
 10. **Tests**: unit (engine/indicators/metrics/sizing) + end-to-end (MCP tool flow) +
     validation against Jesse ground-truth.
 11. **Docs**: `HOW_TERRY_WORKS.md` (user + agent guide), `APIS_AND_SERVICES.md` (services).
+12. **Developer parity**: unchanged static `jesse.*` strategy imports, deterministic
+    `testing_utils`, and a shared strategy-testing agent skill.
 
 ## 5. Verification strategy
 

@@ -13,7 +13,8 @@ def register_general_tools(mcp):
         cfg = ctx.config.get()
         existing = ctx.candle_db.existing()
         return {
-            "name": "Terry", "version": __version__, "status": "ok",
+            "name": "Terry", "version": __version__, "status": "running",
+            "health_status": "ok", "message": "Terry is running",
             "project_root": ctx.project_root,
             "strategies_dir": ctx.strategies_dir,
             "config": {k: cfg[k] for k in ("exchange", "starting_balance", "fee", "type",
@@ -32,5 +33,6 @@ def register_general_tools(mcp):
     @mcp.tool()
     def greet_user(name: str) -> dict:
         """Greet the user by name."""
-        return {"message": f"Hi {name}! Terry is ready to research, backtest, and stress-test "
-                           f"trading strategies. Ask me to import candles and build a strategy."}
+        return {"status": "success", "action": "greeting", "user_name": name,
+                "message": f"Hello, {name}! Terry is ready to research, backtest, and "
+                           f"stress-test trading strategies."}

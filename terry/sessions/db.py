@@ -33,23 +33,28 @@ class SessionStore:
                 state_json TEXT,
                 results_json TEXT,
                 notes TEXT,
+                notes_json TEXT,
                 progress INTEGER DEFAULT 0,
                 created_at INTEGER,
                 updated_at INTEGER
             )
             """
         )
+        columns = {row[1] for row in self._conn().execute("PRAGMA table_info(sessions)")}
+        if "notes_json" not in columns:
+            self._conn().execute("ALTER TABLE sessions ADD COLUMN notes_json TEXT")
         self._conn().commit()
 
-    def create(self, kind, state, notes=""):
+    def create(self, kind, state, notes="", notes_metadata=None):
         if kind not in VALID_KINDS:
             raise ValueError(f"Unknown session kind: {kind}")
         sid = jh.generate_unique_id()
         now = jh.now_to_timestamp()
         self._conn().execute(
-            "INSERT INTO sessions (id, kind, status, state_json, results_json, notes, progress, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (sid, kind, "draft", json.dumps(state), None, notes, 0, now, now))
+            "INSERT INTO sessions (id, kind, status, state_json, results_json, notes, notes_json, progress, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (sid, kind, "draft", json.dumps(state), None, notes,
+             json.dumps(notes_metadata) if notes_metadata else None, 0, now, now))
         self._conn().commit()
         return sid
 
@@ -62,7 +67,16 @@ class SessionStore:
         self._set(sid, state_json=json.dumps(state))
 
     def update_notes(self, sid, notes):
-        self._set(sid, notes=notes)
+        row = self.get(sid)
+        metadata = dict((row or {}).get("notes_metadata") or {})
+        metadata["description"] = notes
+        self._set(sid, notes=notes, notes_json=json.dumps(metadata))
+
+    def update_notes_metadata(self, sid, metadata, notes=None):
+        values = {"notes_json": json.dumps(metadata)}
+        if notes is not None:
+            values["notes"] = notes
+        self._set(sid, **values)
 
     def set_status(self, sid, status):
         self._set(sid, status=status)
@@ -126,6 +140,7 @@ class SessionStore:
         d = dict(row)
         d["state"] = json.loads(d.pop("state_json")) if d.get("state_json") else {}
         d["results"] = json.loads(d.pop("results_json")) if d.get("results_json") else None
+        d["notes_metadata"] = json.loads(d.pop("notes_json")) if d.get("notes_json") else {}
         return d
 
 

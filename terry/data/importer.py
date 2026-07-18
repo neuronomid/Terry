@@ -14,8 +14,10 @@ class Importer:
         self._stop_flags = {}      # import_id -> threading.Event
         self._lock = threading.Lock()
 
-    def start_import(self, exchange, symbol, start_date, finish_date=None):
-        import_id = jh.generate_unique_id()
+    def start_import(self, exchange, symbol, start_date, finish_date=None, import_id=None):
+        import_id = str(import_id or jh.generate_unique_id())
+        if not import_id.strip():
+            raise ValueError("import_id cannot be empty")
         start_ts = jh.date_to_timestamp(start_date)
         finish_ts = jh.date_to_timestamp(finish_date) if finish_date else jh.today_to_timestamp()
         if finish_ts <= start_ts:
@@ -23,6 +25,9 @@ class Importer:
 
         stop = threading.Event()
         with self._lock:
+            existing = self._status.get(import_id)
+            if existing and existing.get("status") in {"started", "running"}:
+                raise ValueError(f"Import {import_id} is already running")
             self._stop_flags[import_id] = stop
             self._status[import_id] = {
                 "import_id": import_id, "status": "started", "progress": 0,
@@ -70,6 +75,9 @@ class Importer:
                              coverage=cov)
         except Exception as e:
             self._update(import_id, status="error", message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._stop_flags.pop(import_id, None)
 
     def _update(self, import_id, **kwargs):
         with self._lock:

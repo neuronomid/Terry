@@ -237,6 +237,16 @@ The long-running tools (`run_backtest`, `run_significance_test`, `run_monte_carl
 status is `finished` or `stopped`. **In Terry these are free and unlimited** (Jesse charges credits
 for them; Terry does not).
 
+The MCP schemas and result envelopes follow Jesse's leading contract, including nested draft
+state, title/status/date session filters, structured titles/descriptions, and automatic source
+snapshots. Terry-only shorthand remains available as keyword-only extensions. Candle imports also
+accept Jesse's reusable `import_id` retry flow.
+
+Unchanged strategy files that statically import `jesse.strategies`, `jesse.indicators`, or
+`jesse.utils` are translated by Terry's loader. Backend contributors can use
+`terry.testing_utils` and the bundled `terry-strategy-tests` agent skill for deterministic
+single-route, multi-route, and data-route lifecycle tests.
+
 Terry's open research surface is audited against Jesse 2.5.0. Live and paper exchange execution,
 exchange accounts, and live notifications are not included; the full matrix is in
 [JESSE_PARITY.md](JESSE_PARITY.md).

@@ -229,6 +229,8 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "Trading Routes JSON" in source and "Data Routes JSON" in source
     assert "JSON.parse(raw)" in source
     assert "Candle Pipeline" in source and "pipeline_params_json" in source
+    assert "Session Title" in source and "Research Notes" in source
+    assert "notes_metadata?.title" in source
     assert "prefers-reduced-motion" in styles
     assert ":focus-visible" in styles
     assert ".pill.finished" in styles
@@ -244,6 +246,7 @@ def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
     created = client.post("/api/sessions/backtest", json={
         "strategy": "DashboardTrade", "exchange": "Binance Perpetual Futures", "symbol": "BTC-USDT",
         "timeframe": "1m", "start_date": "2024-01-01", "finish_date": "2024-01-02",
+        "title": "Dashboard parity run", "description": "Capture this strategy snapshot.",
     })
     assert created.status_code == 200
     session = _wait_for_session(client, created.json()["session_id"])
@@ -251,10 +254,18 @@ def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
     assert session["results"]["metrics"]["total"] >= 1
     assert session["results"]["benchmark"]["return_percentage"] > 0
     assert Path(session["results"]["charts_folder"]).is_dir()
+    assert session["notes_metadata"]["title"] == "Dashboard parity run"
+    assert session["notes_metadata"]["description"] == "Capture this strategy snapshot."
+    assert session["notes_metadata"]["strategy_codes"]
 
     listed = client.get("/api/sessions/backtest?query=DashboardTrade").json()
     assert listed["total"] == 1
-    assert client.patch(f"/api/session/{session['session_id']}", json={"notes": "checked in dashboard"}).json()["notes"] == "checked in dashboard"
+    updated = client.patch(
+        f"/api/session/{session['session_id']}",
+        json={"notes": "checked in dashboard", "title": "Reviewed parity run"}).json()
+    assert updated["notes"] == "checked in dashboard"
+    assert updated["notes_metadata"]["title"] == "Reviewed parity run"
+    assert updated["notes_metadata"]["description"] == "checked in dashboard"
     assert client.get(f"/api/session/{session['session_id']}/export?format=json").status_code == 200
     csv = client.get(f"/api/session/{session['session_id']}/export?format=csv")
     assert csv.status_code == 200 and "entry_price" in csv.text

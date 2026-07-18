@@ -1,0 +1,4 @@
+interface:
+  display_name: "Terry Strategy Tests"
+  short_description: "Write reliable Terry strategy engine tests"
+  default_prompt: "Use $terry-strategy-tests to add a strategy-driven Terry regression test."

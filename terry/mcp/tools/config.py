@@ -8,7 +8,9 @@ def register_config_tools(mcp):
     @mcp.tool()
     def get_config() -> dict:
         """Return Terry's full saved configuration (balance, fee, leverage, exchange, defaults)."""
-        return get_context().config.get()
+        config = get_context().config.get()
+        return {"status": "success", "config": config,
+                "message": "Configuration loaded successfully", **config}
 
     @mcp.tool()
     def update_config(config: str) -> dict:
@@ -20,20 +22,39 @@ def register_config_tools(mcp):
         try:
             partial = json.loads(config) if isinstance(config, str) else config
         except json.JSONDecodeError as e:
-            return {"error": "invalid_json", "message": str(e)}
-        return {"status": "updated", "config": get_context().config.update(partial)}
+            return {"status": "error", "error": "Invalid JSON format",
+                    "error_code": "invalid_json", "details": str(e),
+                    "message": "Failed to parse configuration JSON"}
+        if not isinstance(partial, dict):
+            return {"status": "error", "error": "Invalid configuration",
+                    "error_code": "invalid_config",
+                    "message": "Configuration must be a JSON object"}
+        try:
+            updated = get_context().config.update(partial)
+        except (TypeError, ValueError) as exc:
+            return {"status": "error", "error": "Invalid configuration",
+                    "error_code": "invalid_config", "details": str(exc),
+                    "message": "Failed to update configuration"}
+        return {"status": "success", "session_status": "updated",
+                "config": updated, "message": "Configuration updated successfully"}
 
     @mcp.tool()
     def get_backtest_config() -> dict:
         """Return the config used for backtests (engine-shaped)."""
-        return get_context().config.backtest_config()
+        config = get_context().config.backtest_config()
+        return {"status": "success", "section": "backtest", "config": config,
+                "message": 'Configuration section "backtest" loaded successfully', **config}
 
     @mcp.tool()
     def get_live_config() -> dict:
         """Return the live-trading config (note: live trading is not implemented in Terry)."""
-        return get_context().config.live_config()
+        config = get_context().config.live_config()
+        return {"status": "success", "section": "live", "config": config,
+                "message": 'Configuration section "live" loaded successfully', **config}
 
     @mcp.tool()
     def get_optimization_config() -> dict:
         """Return the optimization config (objective, trials, train/test split)."""
-        return get_context().config.optimization_config()
+        config = get_context().config.optimization_config()
+        return {"status": "success", "section": "optimization", "config": config,
+                "message": 'Configuration section "optimization" loaded successfully', **config}

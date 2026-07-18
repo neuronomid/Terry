@@ -4,7 +4,7 @@ Single source of truth for connecting to and operating **Terry** over MCP. Terry
 self-contained Jesse-compatible crypto research framework: build, backtest, and stress-test
 strategies locally. Free public exchange data, SQLite storage, no cloud/keys.
 
-- **Version 0.2.1** · **174 indicator modules** · **58 MCP tools** · **12 resources**
+- **Version 0.2.2** · **174 indicator modules** · **58 MCP tools** · **12 resources**
 - **Transport:** streamable-HTTP · **URL:** `http://localhost:9021/mcp`
 - Long **and** short, spot **and** futures. Simulation only — never places real orders.
 
@@ -22,7 +22,7 @@ Any MCP client: add an HTTP server at http://localhost:9021/mcp (see .mcp.json).
 
 ## 3. Session model (draft -> run -> poll)
 Backtests, significance tests, Monte Carlo, and optimization all share it:
-1. create_*_draft(...) -> returns session_id (status draft).
+1. create_*_draft(...) -> returns session_id (`status=success`, `session_status=draft`).
 2. run_*(session_id) -> returns immediately (runs in background).
 3. Poll get_*_session(session_id) until status is finished | stopped | terminated | canceled.
 4. Finished -> results + dashboard_url (file:///.../storage/reports/<id>.html; always surface it).
@@ -46,19 +46,21 @@ Strategies: create_strategy(name*, content*), read_strategy(name*), write_strate
 Config: get_config(), update_config(config*) (partial JSON string; user-driven only),
 get_backtest_config(), get_optimization_config(), get_live_config() (live not implemented).
 
-Candles: import_candles(exchange*, symbol*, start_date*, finish_date) -> {import_id};
+Candles: import_candles(exchange*, symbol*, start_date*, import_id, finish_date) -> {import_id};
 get_candle_import_status(import_id*) (poll to finished); cancel_candle_import(import_id*);
 get_candles(exchange*, symbol*, timeframe*); get_existing_candles();
 delete_candles(exchange*, symbol*); clear_candle_cache().
 
 Indicators: list_indicators(), get_indicator_details(indicator_name*).
 
-Backtest: create_backtest_draft(strategy, symbol, timeframe, exchange, start_date, finish_date,
-config, routes, data_routes, debug_mode, export_csv, export_json, export_chart,
-export_tradingview, fast_mode, benchmark),
+Backtest: create_backtest_draft(exchange, routes, data_routes, start_date, finish_date,
+debug_mode, export_csv, export_json, export_chart, export_tradingview, fast_mode, benchmark,
+notes fields; Terry shorthand strategy/symbol/timeframe/config is also accepted),
 run_backtest(session_id*), get_backtest_session(session_id*) (-> results.metrics 44 keys,
-results.trades, results.equity_curve, dashboard_url), get_backtest_sessions(limit),
-update_backtest_draft(backtest_id*, state*), update_backtest_notes(session_id*, notes*),
+results.trades, results.equity_curve, dashboard_url),
+get_backtest_sessions(limit, offset, title_search, status_filter, date_filter),
+update_backtest_draft(backtest_id*, state*),
+update_backtest_notes(session_id*, title, description, strategy_codes),
 cancel_backtest(session_id*), purge_backtest_sessions(days_old).
 
 Significance test: create_significance_test_draft(exchange, routes, data_routes, start_date,
@@ -92,6 +94,11 @@ rerun_optimization(session_id*), get_optimization_logs(session_id*), plus
 get_optimization_sessions / update_optimization_draft / update_optimization_notes / cancel_optimization /
 terminate_optimization / purge_optimization_sessions.
 
+Session tools return Jesse-compatible success/error actions and draft/session envelopes while
+retaining Terry's top-level convenience fields. Notes persist title, description, and automatic
+strategy-code snapshots. Every session-list tool supports Jesse's limit/offset and
+title/status/date filters.
+
 Draft state JSON fields: strategy, symbol, timeframe, exchange, start_date, finish_date,
 config (engine overrides), and per-kind: n_simulations · num_scenarios/run_candles/run_trades ·
 objective/n_trials/train_test_split · hyperparameters.
@@ -104,6 +111,10 @@ terry://optimization.
 
 ## 7. Writing strategies
 Class in strategies/<Name>/__init__.py; methods run once per candle after close (no look-ahead).
+
+Files may use the Terry imports below or unchanged static Jesse imports such as
+`from jesse.strategies import Strategy`, `import jesse.indicators as ta`, and
+`from jesse import utils`; Terry translates those imports at load time.
 
     from terry.strategies import Strategy
     import terry.indicators as ta
@@ -208,6 +219,10 @@ Optuna train/test optimization. Research workers honor cpu_cores locally; the da
 route/data-route JSON, Monte Carlo pipelines, optimization controls, and an IDE-like editor. See
 [JESSE_PARITY.md](JESSE_PARITY.md) for evidence and differences.
 
+Developer parity includes `terry.testing_utils.single_route_backtest`,
+`two_routes_backtest`, and `two_data_routes_backtest`. The project-level
+`terry-strategy-tests` skill is shared through `.claude/skills` and `.agents/skills`.
+
 This is research compatibility, not total product parity: Terry deliberately uses SQLite and a
 local FastAPI/JavaScript dashboard, uses bounded local threads instead of Ray, and does not contain
 Jesse's separate live/paper exchange-execution plugin, account management, or live notifications.
@@ -225,6 +240,8 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
+- 0.2.2 — Jesse-compatible MCP schemas/envelopes, session filters and source snapshots; unchanged
+  `jesse.*` strategy imports; testing helpers and shared agent skill; titled dashboard sessions.
 - 0.2.1 — concurrent local research workers; Jesse fitness and ML diagnostics; isolated shared
   strategy state; route/data-route and pipeline parity in MCP/dashboard; IDE-like browser editor.
 - 0.2.0 — Jesse 2.5 audit; strategy/model/util compatibility fixes; candle pipelines and ML;

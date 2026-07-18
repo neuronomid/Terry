@@ -36,35 +36,35 @@ def register_monte_carlo_tools(mcp):
             strategy, symbol, timeframe, exchange, start_date, finish_date,
             config, route_input, data_routes)
         if err:
-            return {"error": "invalid_config", "message": err}
+            return c._error("invalid_config", err)
         if int(num_scenarios) < 1:
-            return {"error": "invalid_config", "message":
-                    "num_scenarios must be at least 1."}
+            return c._error("invalid_config", "num_scenarios must be at least 1.")
         if cpu_cores is not None and int(cpu_cores) < 1:
-            return {"error": "invalid_config", "message":
-                    "cpu_cores must be an integer greater than 0."}
+            return c._error(
+                "invalid_config", "cpu_cores must be an integer greater than 0.")
         if not run_candles and not run_trades:
-            return {"error": "invalid_config", "message":
-                    "At least one Monte Carlo type must be selected."}
+            return c._error(
+                "invalid_config", "At least one Monte Carlo type must be selected.")
         try:
             params = json.loads(pipeline_params) if pipeline_params else {}
         except json.JSONDecodeError as exc:
-            return {"error": "invalid_config", "message":
-                    f"Invalid pipeline_params JSON: {exc}"}
+            return c._error(
+                "invalid_config", f"Invalid pipeline_params JSON: {exc}")
         if not isinstance(params, dict):
-            return {"error": "invalid_config", "message":
-                    "pipeline_params must be a JSON object."}
+            return c._error(
+                "invalid_config", "pipeline_params must be a JSON object.")
         if pipeline_type not in _PIPELINES:
-            return {"error": "invalid_config", "message":
-                    f"pipeline_type must be one of: {', '.join(sorted(_PIPELINES))}."}
+            return c._error(
+                "invalid_config",
+                f"pipeline_type must be one of: {', '.join(sorted(_PIPELINES))}.")
         params.setdefault("batch_size", 10_080)
         try:
             params["batch_size"] = int(params["batch_size"])
             if params["batch_size"] < 2:
                 raise ValueError("batch_size must be at least 2")
         except (TypeError, ValueError) as exc:
-            return {"error": "invalid_config", "message":
-                    f"Invalid pipeline batch_size: {exc}"}
+            return c._error(
+                "invalid_config", f"Invalid pipeline batch_size: {exc}")
         if pipeline_type == "gaussian_noise":
             params.setdefault("close_sigma", 0.001)
             params.setdefault("high_sigma", 0.0001)
@@ -75,16 +75,16 @@ def register_monte_carlo_tools(mcp):
                     if not math.isfinite(params[field]) or params[field] < 0:
                         raise ValueError(f"{field} cannot be negative")
             except (TypeError, ValueError) as exc:
-                return {"error": "invalid_config", "message":
-                        f"Invalid Gaussian noise parameters: {exc}"}
+                return c._error(
+                    "invalid_config", f"Invalid Gaussian noise parameters: {exc}")
         if pipeline_type == "gaussian_resampler" and params.get("sigma") is not None:
             try:
                 params["sigma"] = float(params["sigma"])
                 if not math.isfinite(params["sigma"]) or params["sigma"] < 0:
                     raise ValueError("sigma cannot be negative")
             except (TypeError, ValueError) as exc:
-                return {"error": "invalid_config", "message":
-                        f"Invalid Gaussian resampler parameters: {exc}"}
+                return c._error(
+                    "invalid_config", f"Invalid Gaussian resampler parameters: {exc}")
         state.update({"num_scenarios": int(num_scenarios),
                       "run_candles": bool(run_candles), "run_trades": bool(run_trades),
                       "fast_mode": bool(fast_mode),
@@ -92,9 +92,10 @@ def register_monte_carlo_tools(mcp):
                                     else c.default_cpu_cores()),
                       "pipeline_type": pipeline_type,
                       "pipeline_params": params})
-        notes = "\n\n".join(filter(None, [title, description, strategy_summary,
+        notes = "\n\n".join(filter(None, [description, strategy_summary,
                                            hypothesis, rationale]))
-        return c.create_draft("monte_carlo", state, notes=notes)
+        return c.create_draft(
+            "monte_carlo", state, notes=notes, title=title, description=description)
 
     @mcp.tool()
     def update_monte_carlo_draft(session_id: str, state: str) -> dict:
@@ -102,9 +103,12 @@ def register_monte_carlo_tools(mcp):
         return c.update_draft("monte_carlo", session_id, state)
 
     @mcp.tool()
-    def update_monte_carlo_notes(session_id: str, notes: str) -> dict:
-        """Attach or update notes on a Monte Carlo session."""
-        return c.update_notes(session_id, notes)
+    def update_monte_carlo_notes(session_id: str, title: str = None,
+                                 description: str = None,
+                                 strategy_codes: str = None, *,
+                                 notes: str = None) -> dict:
+        """Update Jesse-compatible note metadata and captured strategy source."""
+        return c.update_notes(session_id, title, description, strategy_codes, notes)
 
     @mcp.tool()
     def get_monte_carlo_session(session_id: str) -> dict:
@@ -115,9 +119,13 @@ def register_monte_carlo_tools(mcp):
         return payload
 
     @mcp.tool()
-    def get_monte_carlo_sessions(limit: int = 20) -> dict:
-        """List recent Monte Carlo sessions."""
-        return c.list_sessions("monte_carlo", limit)
+    def get_monte_carlo_sessions(limit: int = 50, offset: int = 0,
+                                 title_search: str = None,
+                                 status_filter: str = None,
+                                 date_filter: str = None) -> dict:
+        """List Monte Carlo sessions with Jesse-compatible pagination and filters."""
+        return c.list_sessions(
+            "monte_carlo", limit, offset, title_search, status_filter, date_filter)
 
     @mcp.tool()
     def get_monte_carlo_equity_curves(session_id: str) -> dict:

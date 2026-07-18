@@ -112,9 +112,9 @@ async def run():
 
             # ---- strategies
             r = await call(session, "create_strategy", name="E2ECross", content=STRATEGY_SRC)
-            assert r["status"] in ("created", "written"), r
+            assert r["status"] == "success", r
             r = await call(session, "create_strategy", name="E2EEntry", content=ENTRY_SRC)
-            assert r["status"] in ("created", "written"), r
+            assert r["status"] == "success", r
             r = await call(session, "read_strategy", name="E2ECross")
             assert "class E2ECross" in r["content"]
             print("[strategy] created + read back E2ECross, E2EEntry")

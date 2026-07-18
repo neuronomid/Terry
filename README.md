@@ -77,12 +77,15 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
   stop-loss/take-profit, and 44 performance metrics.
 - **Strategy API** — Jesse-compatible `Strategy`, order, position, and trade surfaces, including
   ML gather/deploy helpers and candle pipelines.
+- **Drop-in strategy loading** — unchanged static `jesse.*` imports are translated at load time;
+  `terry.testing_utils` and the bundled `terry-strategy-tests` agent skill provide deterministic
+  lifecycle regression tests.
 - **Research tools** — Rule Significance Test (bootstrap p-value), Monte Carlo (overfit/robustness),
   ML training, backtest exports/charts/benchmarking, and Optuna optimization with out-of-sample
   validation. CPU controls drive bounded local workers for significance, Monte Carlo, and
   optimization.
 - **Research dashboard** — IDE-like strategy editor plus multi-route/data-route, pipeline,
-  optimization, export, and robustness controls.
+  optimization, export, robustness, titled-session notes, and source-snapshot controls.
 - **58 MCP tools + 12 resources** — tools for strategy creation, data import, configuration,
   backtesting, and analysis.
 - **Free data + local storage** — 10 Jesse backtest exchanges through public REST + SQLite.
