@@ -9,13 +9,16 @@ from typing import Any
 
 import joblib
 import numpy as np
-from scipy.stats import spearmanr
+from scipy.stats import rankdata, spearmanr
 from sklearn.base import clone
+from sklearn.feature_selection import RFE, f_classif, f_regression
 from sklearn.metrics import (
     accuracy_score, confusion_matrix, matthews_corrcoef, mean_absolute_error,
     mean_squared_error, precision_recall_fscore_support, r2_score, roc_auc_score,
 )
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC, SVR
 
 
 def gather_ml_data(config: dict, routes: list[dict], data_routes: list[dict],
@@ -102,7 +105,12 @@ def train_model(data: list[dict], estimator: Any, task: str = "binary",
             "spearman": float(correlation.statistic),
         }
 
-    importance = _feature_importance(model, feature_names)
+    importance = _feature_importance(
+        X_train_scaled, y_train, feature_names, estimator, task)
+    baseline_metric = metrics["mae"] if task == "regression" else metrics["accuracy"]
+    feature_impact = _feature_impact(
+        X_train_scaled, X_test_scaled, y_train, y_test, feature_names,
+        estimator, baseline_metric, task)
     train_test_info = {
         "train_size": len(X_train), "test_size": len(X_test),
         "train_start": _date(ordered[0]["time"]),
@@ -123,7 +131,7 @@ def train_model(data: list[dict], estimator: Any, task: str = "binary",
     output = {
         "model": model, "scaler": scaler, "feature_names": feature_names,
         "metrics": metrics, "feature_importance": importance,
-        "feature_impact": [], "train_test_info": train_test_info,
+        "feature_impact": feature_impact, "train_test_info": train_test_info,
     }
     if task == "binary":
         output.update({"calibration": calibration, "class_weights": class_weights})
@@ -204,29 +212,108 @@ def _probabilities(model, values):
     return np.asarray(model.predict_proba(values), dtype=float)
 
 
-def _feature_importance(model, names):
-    raw = getattr(model, "feature_importances_", None)
-    if raw is None and hasattr(model, "coef_"):
-        raw = np.mean(np.abs(np.atleast_2d(model.coef_)), axis=0)
-    values = np.asarray(raw if raw is not None else np.zeros(len(names)), dtype=float)
-    order = np.argsort(-values)
+def _feature_importance(X_train, y_train, names, estimator, task, n_splits=5):
+    """Jesse's four-method consensus: RFE, F-test, correlation, and CV impact."""
+    feature_count = len(names)
+    if feature_count == 0:
+        return {"feature_names": [], "rfe_ranking": [], "anova_f_values": [],
+                "correlations": [], "cv_baseline": float("nan"), "cv_impacts": {},
+                "cv_scores_without_feature": {}, "consensus_ranks": {}, "_order": []}
+
+    proxy_rfe = SVR(kernel="linear") if task == "regression" else SVC(kernel="linear")
+    proxy_cv = (SVR(kernel="rbf", C=1.0, gamma="scale") if task == "regression"
+                else SVC(kernel="rbf", C=1.0, gamma="scale"))
+    scoring = "r2" if task == "regression" else "accuracy"
+    try:
+        rfe = RFE(proxy_rfe, n_features_to_select=1, step=1).fit(X_train, y_train)
+        rfe_ranking = rfe.ranking_.astype(float)
+    except (ValueError, TypeError):
+        rfe_ranking = np.ones(feature_count, dtype=float)
+    try:
+        f_values, _ = ((f_regression(X_train, y_train) if task == "regression"
+                        else f_classif(X_train, y_train)))
+        f_values = np.nan_to_num(f_values, nan=0.0, posinf=0.0, neginf=0.0)
+    except (ValueError, TypeError):
+        f_values = np.zeros(feature_count, dtype=float)
+    correlations = np.asarray([
+        abs(np.corrcoef(X_train[:, index], y_train)[0, 1])
+        for index in range(feature_count)
+    ])
+    correlations = np.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
+
+    split_count = min(n_splits, max(0, len(X_train) - 1))
+    baseline_cv = float("nan")
+    cv_without = np.full(feature_count, np.nan)
+    if split_count >= 2:
+        splitter = TimeSeriesSplit(n_splits=split_count)
+        try:
+            baseline_cv = float(cross_val_score(
+                proxy_cv, X_train, y_train, cv=splitter, scoring=scoring).mean())
+            for index in range(feature_count):
+                reduced = np.delete(X_train, index, axis=1)
+                if reduced.shape[1] == 0:
+                    cv_without[index] = baseline_cv
+                else:
+                    cv_without[index] = float(cross_val_score(
+                        clone(proxy_cv), reduced, y_train,
+                        cv=TimeSeriesSplit(n_splits=split_count), scoring=scoring).mean())
+        except (ValueError, TypeError):
+            baseline_cv = float("nan")
+    cv_impacts = (baseline_cv - cv_without if np.isfinite(baseline_cv)
+                  else np.zeros(feature_count))
+    cv_impacts = np.nan_to_num(cv_impacts, nan=0.0, posinf=0.0, neginf=0.0)
+
+    consensus = (
+        rfe_ranking + rankdata(-f_values) + rankdata(-correlations)
+        + rankdata(-cv_impacts)
+    ) / 4.0
     return {
         "feature_names": list(names),
-        "model_importance": {name: float(values[index]) for index, name in enumerate(names)},
-        "consensus_ranks": {names[index]: rank + 1 for rank, index in enumerate(order)},
-        "_order": order.tolist(),
+        "rfe_ranking": rfe_ranking.tolist(),
+        "anova_f_values": f_values.tolist(),
+        "correlations": correlations.tolist(),
+        "cv_baseline": baseline_cv,
+        "cv_impacts": {name: float(cv_impacts[index]) for index, name in enumerate(names)},
+        "cv_scores_without_feature": {
+            name: float(cv_without[index]) for index, name in enumerate(names)},
+        "consensus_ranks": {
+            name: float(consensus[index]) for index, name in enumerate(names)},
+        "_order": np.argsort(consensus).tolist(),
     }
 
 
 def _calibration(y_true, probabilities):
     output = []
-    for low, high in ((0, .2), (.2, .4), (.4, .6), (.6, .8), (.8, 1.01)):
+    for low, high in ((.3, .4), (.4, .5), (.5, .6), (.6, .7), (.7, .8), (.8, 1.01)):
         mask = (probabilities >= low) & (probabilities < high)
         if mask.any():
-            output.append({"range": f"[{low:.1f}–{min(high, 1):.1f})", "n": int(mask.sum()),
-                           "actual_rate": float(np.mean(y_true[mask])),
-                           "expected": (low + min(high, 1)) / 2})
+            expected = (low + min(high, 1)) / 2
+            actual = float(np.mean(y_true[mask]))
+            output.append({"range": f"[{low:.1f}–{min(high, 1):.1f})",
+                           "n": int(mask.sum()), "actual_rate": actual,
+                           "expected": expected, "diff": actual - expected})
     return output
+
+
+def _feature_impact(X_train, X_test, y_train, y_test, names, estimator,
+                    baseline_metric, task):
+    """Retrain without each feature and report the test-metric delta."""
+    impacts = []
+    for index, name in enumerate(names):
+        reduced_train = np.delete(X_train, index, axis=1)
+        reduced_test = np.delete(X_test, index, axis=1)
+        if reduced_train.shape[1] == 0:
+            metric = baseline_metric
+        else:
+            model = clone(estimator)
+            model.fit(reduced_train, y_train)
+            prediction = model.predict(reduced_test)
+            metric = (mean_absolute_error(y_test, prediction) if task == "regression"
+                      else accuracy_score(y_test, prediction))
+        impacts.append({"feature": name, "metric": float(metric),
+                        "delta": float(metric - baseline_metric)})
+    impacts.sort(key=lambda item: item["delta"])
+    return impacts
 
 
 def _label_is_positive(value):

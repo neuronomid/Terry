@@ -11,6 +11,34 @@ from ..research import (backtest, rule_significance_test,
                         monte_carlo_candles, monte_carlo_trades, optimize)
 
 
+def _candle_pipeline(state):
+    name = state.get("pipeline_type")
+    if not name:
+        return None, None
+    from ..candle_pipelines import (
+        GaussianNoiseCandlesPipeline, GaussianResamplerCandlesPipeline,
+        MovingBlockBootstrapCandlesPipeline,
+    )
+    pipelines = {
+        "moving_block_bootstrap": MovingBlockBootstrapCandlesPipeline,
+        "gaussian_noise": GaussianNoiseCandlesPipeline,
+        "gaussian_resampler": GaussianResamplerCandlesPipeline,
+    }
+    try:
+        pipeline = pipelines[name]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown pipeline_type '{name}'. Choose one of: {', '.join(pipelines)}."
+        ) from exc
+    params = dict(state.get("pipeline_params") or {})
+    params.setdefault("batch_size", 10_080)
+    if name == "gaussian_noise":
+        params.setdefault("close_sigma", 0.001)
+        params.setdefault("high_sigma", 0.0001)
+        params.setdefault("low_sigma", 0.0001)
+    return pipeline, params
+
+
 class MissingCandles(Exception):
     pass
 
@@ -200,6 +228,8 @@ class Runner:
         res = rule_significance_test(config, routes, data_routes, candles, warmup_candles=warmup,
                                      hyperparameters=state.get("hyperparameters"),
                                      n_simulations=n_sims, strategies_dir=self.ctx.strategies_dir,
+                                     random_seed=state.get("random_seed"),
+                                     cpu_cores=state.get("cpu_cores"),
                                      progress_callback=self._progress_cb(sid),
                                      should_cancel=self._should_cancel(sid))
         # Jesse's pure research function returns the full ndarray for plotting. MCP
@@ -214,11 +244,16 @@ class Runner:
         num = int(state.get("num_scenarios", 200))
         run_candles = state.get("run_candles", True)
         run_trades = state.get("run_trades", False)
+        pipeline_class, pipeline_params = _candle_pipeline(state)
         out = {}
         if run_candles:
             candles_result = monte_carlo_candles(
                 config, routes, data_routes, candles, warmup_candles=warmup,
                 hyperparameters=state.get("hyperparameters"), num_scenarios=num,
+                cpu_cores=state.get("cpu_cores"),
+                fast_mode=state.get("fast_mode", True),
+                candles_pipeline_class=pipeline_class,
+                candles_pipeline_kwargs=pipeline_params,
                 strategies_dir=self.ctx.strategies_dir, progress_callback=self._progress_cb(sid),
                 should_cancel=self._should_cancel(sid), max_equity_points=500)
             out["candles"] = _compact_monte_carlo(candles_result)
@@ -228,7 +263,9 @@ class Runner:
             trades_result = monte_carlo_trades(
                 config, routes, data_routes, candles, warmup_candles=warmup,
                 hyperparameters=state.get("hyperparameters"),
-                num_scenarios=max(500, num * 5), strategies_dir=self.ctx.strategies_dir,
+                num_scenarios=num, cpu_cores=state.get("cpu_cores"),
+                fast_mode=state.get("fast_mode", True),
+                strategies_dir=self.ctx.strategies_dir,
                 progress_callback=self._progress_cb(sid),
                 should_cancel=self._should_cancel(sid), max_equity_points=500)
             out["trades"] = _compact_monte_carlo(trades_result)
@@ -263,7 +300,7 @@ class Runner:
         res = optimize(
             config, routes, data_routes,
             objective_function=state.get("objective_function", state.get("objective", "sharpe")),
-            optimal_total=state.get("optimal_total", 50),
+            optimal_total=state.get("optimal_total", 200),
             best_candidates_count=state.get("best_candidates_count", 20),
             fast_mode=state.get("fast_mode", True), cpu_cores=state.get("cpu_cores"),
             strategies_dir=self.ctx.strategies_dir,

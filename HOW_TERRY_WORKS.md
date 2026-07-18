@@ -23,6 +23,7 @@ Think of Terry as three things working together:
    apply candle pipelines, benchmark and export results, check whether your entry rule is
    *actually better than random* (significance test), whether a good-looking result was just *luck*
    (Monte Carlo), and it can *tune* your strategy's numbers (optimization).
+   These research modes can use bounded local workers through their `cpu_cores` setting.
 3. **An MCP server** — a small local web service that exposes all of the above as "tools" an AI
    agent can call. The agent presses the same buttons you would, but through a safe channel.
 

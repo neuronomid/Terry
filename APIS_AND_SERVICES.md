@@ -32,7 +32,7 @@ The real Jesse requires more infrastructure. Terry replaced each with a zero-con
 | **PostgreSQL** | stores candles & sessions | **SQLite** file in `storage/` |
 | **Redis** | pub/sub + caching between its two processes | not needed (Terry is a single process) |
 | **Jesse license / credits** | the `run_*` MCP tools are metered on Jesse's paid plan | **removed** — everything is free & unlimited in Terry |
-| **Ray** | distributed optimization | local Optuna TPE (simpler, but single-process) |
+| **Ray** | distributed optimization/research workers | bounded local worker threads + Optuna TPE |
 
 So compared to Jesse you save: a Postgres server, a Redis server, and any subscription. If you ever
 *want* Postgres you can add it, but it is not necessary.

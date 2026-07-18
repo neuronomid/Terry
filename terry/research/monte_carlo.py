@@ -12,6 +12,7 @@ import os
 import numpy as np
 
 from .backtest import backtest
+from ._workers import parallel_results, resolve_strategy_classes, resolve_workers
 
 
 KEY_METRICS = [
@@ -95,20 +96,32 @@ def monte_carlo_candles(
 ) -> dict:
     """Run Jesse-shaped market-path Monte Carlo simulations.
 
-    ``cpu_cores`` is accepted for source compatibility. Terry deliberately uses its
-    deterministic in-process engine; callers receive the same streamed callback and
-    result contracts without requiring Ray.
+    Scenarios execute concurrently in isolated local engine stores. ``cpu_cores``
+    follows Jesse's validation and 80%-of-available default without requiring Ray.
     """
-    del cpu_cores
     if num_scenarios < 1:
         raise ValueError("num_scenarios must be at least 1")
     if block < 1:
         raise ValueError("block must be at least 1")
+    random_seed = 42 if random_seed is None else random_seed
     data_routes = data_routes or []
     candles = candles or {}
     pipeline_kwargs = candles_pipeline_kwargs or {}
+    strategy_classes = resolve_strategy_classes(
+        routes, strategies_dir, strategy_classes, strategy_sources)
+    strategies_dir = None
+    strategy_sources = None
+    workers = resolve_workers(cpu_cores, max(1, num_scenarios - 1))
 
-    def run_scenario(scenario_candles, pipeline_class=None):
+    def run_scenario(scenario_candles, pipeline_class=None, scenario_index=0):
+        scenario_pipeline_kwargs = dict(pipeline_kwargs)
+        if pipeline_class is not None and "seed" not in scenario_pipeline_kwargs:
+            signature = inspect.signature(pipeline_class)
+            accepts_seed = "seed" in signature.parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values())
+            if accepts_seed:
+                scenario_pipeline_kwargs["seed"] = int(random_seed) + scenario_index
         return backtest(
             config,
             routes,
@@ -119,7 +132,7 @@ def monte_carlo_candles(
             hyperparameters=hyperparameters,
             fast_mode=fast_mode,
             candles_pipeline_class=pipeline_class,
-            candles_pipeline_kwargs=pipeline_kwargs,
+            candles_pipeline_kwargs=scenario_pipeline_kwargs,
             strategies_dir=strategies_dir,
             strategy_classes=strategy_classes,
             strategy_sources=strategy_sources,
@@ -133,10 +146,10 @@ def monte_carlo_candles(
         _emit_progress(progress_callback, 1, num_scenarios)
         progress.update()
 
-        rng = np.random.default_rng(random_seed)
         scenarios = []
-        for scenario_index in range(1, num_scenarios):
-            _check_canceled(should_cancel)
+        def simulate(scenario_index):
+            rng = np.random.default_rng(
+                np.random.SeedSequence([int(random_seed), scenario_index]))
             if candles_pipeline_class is None:
                 scenario_candles = {
                     key: {
@@ -147,15 +160,19 @@ def monte_carlo_candles(
                 }
                 raw_result = run_scenario(scenario_candles)
             else:
-                raw_result = run_scenario(candles, candles_pipeline_class)
-            scenario = _scenario_result(raw_result, scenario_index, max_equity_points)
+                raw_result = run_scenario(candles, candles_pipeline_class, scenario_index)
+            return _scenario_result(raw_result, scenario_index, max_equity_points)
+
+        for scenario_index, scenario in parallel_results(
+                simulate, range(1, num_scenarios), workers, should_cancel):
             scenarios.append(scenario)
             _emit_result(result_callback, scenario)
-            _emit_progress(progress_callback, scenario_index + 1, num_scenarios)
+            _emit_progress(progress_callback, len(scenarios) + 1, num_scenarios)
             progress.update()
     finally:
         progress.close()
 
+    scenarios.sort(key=lambda item: item["scenario_index"])
     original_metrics = original.get("metrics", {})
     scenario_metrics = [scenario.get("metrics", {}) for scenario in scenarios]
     summary = _compact_summary(original_metrics, scenario_metrics, KEY_METRICS)
@@ -204,9 +221,9 @@ def monte_carlo_trades(
     Passing a configuration dict runs the original backtest, matching Jesse. Passing a
     list of closed trades remains supported for Terry 0.1 callers and session storage.
     """
-    del cpu_cores
     if num_scenarios < 1:
         raise ValueError("num_scenarios must be at least 1")
+    random_seed = 42 if random_seed is None else random_seed
 
     if isinstance(config, dict):
         if routes is None or candles is None:
@@ -260,27 +277,32 @@ def monte_carlo_trades(
             "equity_curve": _series_equity(original_points),
         }
 
-    rng = np.random.default_rng(random_seed)
+    workers = resolve_workers(cpu_cores, num_scenarios)
     scenarios = []
     progress = _Progress(progress_bar, num_scenarios, "Monte Carlo Scenarios")
     try:
-        for scenario_index in range(num_scenarios):
-            _check_canceled(should_cancel)
+        def simulate(scenario_index):
+            rng = np.random.default_rng(
+                np.random.SeedSequence([int(random_seed), scenario_index]))
             shuffled = [trades[index] for index in rng.permutation(len(trades))]
             points = _reconstruct_equity_curve(shuffled, original_points, balance)
-            scenario = {
+            return {
                 **_trade_metrics(points, balance),
                 "scenario_index": scenario_index,
                 "trades": shuffled,
                 "equity_curve": _series_equity(points),
             }
+
+        for scenario_index, scenario in parallel_results(
+                simulate, range(num_scenarios), workers, should_cancel):
             scenarios.append(scenario)
             _emit_result(result_callback, scenario)
-            _emit_progress(progress_callback, scenario_index + 1, num_scenarios)
+            _emit_progress(progress_callback, len(scenarios), num_scenarios)
             progress.update()
     finally:
         progress.close()
 
+    scenarios.sort(key=lambda item: item["scenario_index"])
     confidence = _trade_confidence(original, scenarios)
     drawdowns = np.asarray([scenario["max_drawdown"] for scenario in scenarios])
     drawdown_summary = {"original": _num(original.get("metrics", {}).get("max_drawdown"))}

@@ -38,6 +38,7 @@ _OBJECTIVES = {
     "smart sortino", "net_profit_percentage",
 }
 _SESSION_KINDS = ("backtest", "optimization", "monte_carlo", "significance_test")
+_PIPELINE_TYPES = {"moving_block_bootstrap", "gaussian_noise", "gaussian_resampler"}
 _ENGINE_CONFIG_KEYS = {
     "starting_balance", "fee", "type", "futures_leverage", "futures_leverage_mode",
     "quote_asset", "warm_up_candles",
@@ -108,6 +109,51 @@ def _symbol(value: Any) -> str:
     if not _SYMBOL.fullmatch(symbol):
         raise _error(422, "symbol must use BASE-QUOTE format, for example BTC-USDT.")
     return symbol
+
+
+def _timeframe(value: Any) -> str:
+    timeframe = str(value or "4h")
+    try:
+        jh.timeframe_to_one_minutes(timeframe)
+    except Exception as exc:
+        raise _error(422, f"Unsupported timeframe: {timeframe}.") from exc
+    return timeframe
+
+
+def _routes(ctx: TerryContext, value: Any, exchange: str, *, trading: bool) -> list[dict]:
+    label = "routes" if trading else "data_routes"
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _error(422, f"{label} must be a JSON array.")
+    output = []
+    allowed = {"exchange", "symbol", "timeframe"} | ({"strategy"} if trading else set())
+    required = {"symbol", "timeframe"} | ({"strategy"} if trading else set())
+    for index, route in enumerate(value):
+        if not isinstance(route, dict) or not required.issubset(route):
+            fields = ", ".join(sorted(required))
+            raise _error(422, f"{label}[{index}] must be an object containing {fields}.")
+        unknown = set(route) - allowed
+        if unknown:
+            raise _error(422, f"Unknown {label}[{index}] field(s): {', '.join(sorted(unknown))}.")
+        route_exchange = str(route.get("exchange") or exchange)
+        if route_exchange not in EXCHANGES:
+            raise _error(422, f"Unknown exchange in {label}[{index}]: {route_exchange}.")
+        if route_exchange != exchange:
+            raise _error(422, "All routes in one research run must use the selected exchange.")
+        normalized = {
+            "exchange": route_exchange,
+            "symbol": _symbol(route["symbol"]),
+            "timeframe": _timeframe(route["timeframe"]),
+        }
+        if trading:
+            strategy = _require_name(str(route["strategy"]))
+            if not strategy_exists(ctx.strategies_dir, strategy):
+                raise _error(404, f'Strategy "{strategy}" does not exist.',
+                             "strategy_not_found")
+            normalized["strategy"] = strategy
+        output.append(normalized)
+    return output
 
 
 def _validate_engine_config(payload: dict[str, Any]) -> dict[str, Any]:
@@ -210,29 +256,44 @@ def _session_list(ctx: TerryContext, kind: str, limit: int, offset: int, query: 
 
 
 def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
-    strategy = _require_name(str(payload.get("strategy", "")))
-    if not strategy_exists(ctx.strategies_dir, strategy):
-        raise _error(404, f'Strategy "{strategy}" does not exist.', "strategy_not_found")
-    exchange = payload.get("exchange") or ctx.config.get()["exchange"]
+    raw_routes = payload.get("routes")
+    first_route = (raw_routes[0] if isinstance(raw_routes, list) and raw_routes
+                   and isinstance(raw_routes[0], dict) else {})
+    exchange = payload.get("exchange") or first_route.get("exchange") or ctx.config.get()["exchange"]
     if exchange not in EXCHANGES:
         raise _error(422, f"Unknown exchange: {exchange}.")
+    routes = _routes(ctx, raw_routes, exchange, trading=True)
+    data_routes = _routes(ctx, payload.get("data_routes"), exchange, trading=False)
+    if routes:
+        primary = routes[0]
+        strategy = primary["strategy"]
+        symbol = primary["symbol"]
+        timeframe = primary["timeframe"]
+    else:
+        strategy = _require_name(str(payload.get("strategy", "")))
+        if not strategy_exists(ctx.strategies_dir, strategy):
+            raise _error(404, f'Strategy "{strategy}" does not exist.', "strategy_not_found")
+        symbol = _symbol(payload.get("symbol"))
+        timeframe = _timeframe(payload.get("timeframe", "4h"))
     start_date = _date(payload.get("start_date"), "start_date")
     finish_date = _date(payload.get("finish_date"), "finish_date")
     if jh.date_to_timestamp(finish_date) <= jh.date_to_timestamp(start_date):
         raise _error(422, "finish_date must be after start_date.")
-    timeframe = payload.get("timeframe", "4h")
-    try:
-        jh.timeframe_to_one_minutes(timeframe)
-    except Exception as exc:
-        raise _error(422, f"Unsupported timeframe: {timeframe}.") from exc
     state = {
         "strategy": strategy,
-        "symbol": _symbol(payload.get("symbol")),
+        "symbol": symbol,
         "exchange": exchange,
         "timeframe": timeframe,
         "start_date": start_date,
         "finish_date": finish_date,
     }
+    if routes:
+        pairs = [(route["exchange"], route["symbol"]) for route in routes]
+        if len(pairs) != len(set(pairs)):
+            raise _error(422, "Two trading routes cannot use the same exchange-symbol pair.")
+        state["routes"] = routes
+    if data_routes:
+        state["data_routes"] = data_routes
     overrides = payload.get("config")
     if overrides is not None:
         if not isinstance(overrides, dict):
@@ -248,12 +309,15 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
 def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if kind not in VALID_KINDS:
         raise _error(404, "Unknown research mode.", "unknown_mode")
-    allowed = {"strategy", "exchange", "symbol", "timeframe", "start_date", "finish_date",
-               "config", "hyperparameters", "notes", "start"}
+    allowed = {"strategy", "exchange", "symbol", "timeframe", "routes", "data_routes",
+               "start_date", "finish_date", "config", "hyperparameters", "notes",
+               "cpu_cores", "start"}
     allowed |= {
-        "significance_test": {"n_simulations", "hypothesis", "rationale"},
-        "monte_carlo": {"num_scenarios", "run_candles", "run_trades"},
-        "optimization": {"n_trials", "train_test_split", "objective"},
+        "significance_test": {"n_simulations", "random_seed", "hypothesis", "rationale"},
+        "monte_carlo": {"num_scenarios", "run_candles", "run_trades", "fast_mode",
+                        "pipeline_type", "pipeline_params"},
+        "optimization": {"n_trials", "train_test_split", "objective", "optimal_total",
+                         "best_candidates_count"},
         "backtest": {"debug_mode", "export_csv", "export_json", "export_chart",
                      "export_tradingview", "fast_mode", "benchmark"},
     }[kind]
@@ -267,18 +331,49 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
     if len(notes) > 20_000:
         raise _error(422, "notes cannot exceed 20,000 characters.")
     state = _base_state(ctx, payload)
+    if kind == "significance_test" and len(state.get("routes") or [state]) != 1:
+        raise _error(422, "Rule significance testing requires exactly one trading route.")
+    if "cpu_cores" in payload:
+        state["cpu_cores"] = _integer(payload["cpu_cores"], "cpu_cores", 1)
     if kind == "significance_test":
         simulations = _integer(payload.get("n_simulations", 2_000), "n_simulations", 2_000)
         state.update({"n_simulations": simulations, "hypothesis": str(payload.get("hypothesis") or ""),
                       "rationale": str(payload.get("rationale") or "")})
+        if "random_seed" in payload:
+            state["random_seed"] = _integer(payload["random_seed"], "random_seed")
     elif kind == "monte_carlo":
         scenarios = _integer(payload.get("num_scenarios", 200), "num_scenarios", 1)
         run_candles = _boolean(payload.get("run_candles", True), "run_candles")
         run_trades = _boolean(payload.get("run_trades", False), "run_trades")
         if not run_candles and not run_trades:
             raise _error(422, "Enable candle resampling, trade-order shuffling, or both.")
+        pipeline_type = str(payload.get("pipeline_type", "moving_block_bootstrap"))
+        if pipeline_type not in _PIPELINE_TYPES:
+            raise _error(422, f"pipeline_type must be one of: {', '.join(sorted(_PIPELINE_TYPES))}.")
+        pipeline_params = payload.get("pipeline_params")
+        if pipeline_params is None:
+            pipeline_params = {}
+        if not isinstance(pipeline_params, dict):
+            raise _error(422, "pipeline_params must be a JSON object.")
+        pipeline_params = dict(pipeline_params)
+        pipeline_params.setdefault("batch_size", 10_080)
+        pipeline_params["batch_size"] = _integer(
+            pipeline_params["batch_size"], "pipeline_params.batch_size", 2)
+        if pipeline_type == "gaussian_noise":
+            pipeline_params.setdefault("close_sigma", 0.001)
+            pipeline_params.setdefault("high_sigma", 0.0001)
+            pipeline_params.setdefault("low_sigma", 0.0001)
+            for field in ("close_sigma", "high_sigma", "low_sigma"):
+                pipeline_params[field] = _number(
+                    pipeline_params[field], f"pipeline_params.{field}")
+        if pipeline_type == "gaussian_resampler" and pipeline_params.get("sigma") is not None:
+            pipeline_params["sigma"] = _number(
+                pipeline_params["sigma"], "pipeline_params.sigma")
         state.update({"num_scenarios": scenarios, "run_candles": run_candles,
-                      "run_trades": run_trades})
+                      "run_trades": run_trades,
+                      "fast_mode": _boolean(payload.get("fast_mode", True), "fast_mode"),
+                      "pipeline_type": pipeline_type,
+                      "pipeline_params": pipeline_params})
     elif kind == "optimization":
         trials = _integer(payload.get("n_trials", 100), "n_trials", 1)
         split = _number(payload.get("train_test_split", 0.75), "train_test_split", 0.1, exclusive=True)
@@ -288,7 +383,12 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         if objective not in _OBJECTIVES:
             raise _error(422, f"objective must be one of: {', '.join(sorted(_OBJECTIVES))}.")
         state.update({"objective": objective, "n_trials": trials,
-                      "train_test_split": split})
+                      "train_test_split": split,
+                      "optimal_total": _integer(payload.get("optimal_total", 200),
+                                                "optimal_total", 2),
+                      "best_candidates_count": _integer(
+                          payload.get("best_candidates_count", 20),
+                          "best_candidates_count", 1)})
     elif kind == "backtest":
         for field, default in {
             "debug_mode": False, "export_csv": False, "export_json": False,

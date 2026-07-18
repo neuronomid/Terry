@@ -36,6 +36,16 @@ td,.metric-card strong,.progress-card small { font-variant-numeric:tabular-nums;
 .light .hero,.light .login { color:#f3f4f6; }
 .light .hero h2,.light .login h1 { color:#f3f4f6; }
 .light .code-editor { color:#1f2430; }
+.code-shell { display:grid; grid-template-columns:auto minmax(0,1fr); overflow:hidden; background:#15171d; }
+.code-shell .code-editor { grid-column:2; padding-left:14px; }
+.line-numbers { grid-column:1; grid-row:1; height:515px; min-width:48px; overflow:hidden; margin:0; padding:20px 12px; user-select:none; text-align:right; background:#121419; border-right:1px solid var(--stroke); color:#606775; font-size:13px; line-height:1.6; }
+.editor-status { display:flex; justify-content:space-between; gap:15px; padding:7px 13px; border-top:1px solid var(--stroke); background:#121419; color:#747c8d; font:11px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+.route-builder { grid-column:1/-1; padding:12px 14px; border:1px solid #323743; border-radius:7px; background:#15171d; }
+.route-builder summary { cursor:pointer; color:var(--subtle); font-size:12px; font-weight:700; }
+.route-builder p { margin:10px 0; color:var(--muted); font-size:12px; }
+.route-builder label { margin-top:11px; }
+.route-builder textarea { min-height:82px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:12px; }
+.light .code-shell,.light .line-numbers,.light .editor-status,.light .route-builder { background:#f7f8fa; }
 .light .form-grid label,.light .notes-label,.light .strategy-item,.light .indicator-list button,.light .feature-list,.light .result summary,.light td code { color:#4d5666; }
 .light .indicator-doc pre,.light .callout { color:#4d5666; }
 .light .login-card form { color:#f3f4f6; }

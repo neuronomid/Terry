@@ -33,7 +33,7 @@ class DashboardTrade(Strategy):
 '''
 
 
-def _seed_candles(project: Path) -> None:
+def _seed_candles(project: Path, symbols=("BTC-USDT",)) -> None:
     (project / "storage").mkdir(parents=True, exist_ok=True)
     db = CandleDB(project / "storage" / "candles.db")
     start = jh.date_to_timestamp("2024-01-01")
@@ -41,7 +41,8 @@ def _seed_candles(project: Path) -> None:
     for index in range(1_440):
         price = 100 + index * 0.02
         rows.append([start + index * 60_000, price, price, price + 0.1, price - 0.1, 10])
-    db.store("Binance Perpetual Futures", "BTC-USDT", rows)
+    for symbol in symbols:
+        db.store("Binance Perpetual Futures", symbol, rows)
 
 
 def _wait_for_session(client: TestClient, session_id: str) -> dict:
@@ -144,11 +145,56 @@ def test_dashboard_rejects_malformed_research_and_config_payloads(tmp_path: Path
     assert client.get("/api/sessions/backtest").json()["total"] == 0
     assert client.post("/api/sessions/optimization", json={**base, "n_trials": "many"}).status_code == 422
     assert client.post("/api/sessions/optimization", json={**base, "objective": "made_up"}).status_code == 422
+    assert client.post("/api/sessions/optimization", json={
+        **base, "optimal_total": 1,
+    }).status_code == 422
     assert client.post("/api/sessions/monte_carlo", json={
         **base, "run_candles": "false", "run_trades": False,
     }).status_code == 422
     assert client.post("/api/sessions/monte_carlo", json={
         **base, "run_candles": False, "run_trades": False,
+    }).status_code == 422
+    assert client.post("/api/sessions/monte_carlo", json={
+        **base, "pipeline_type": "unknown",
+    }).status_code == 422
+    assert client.post("/api/sessions/monte_carlo", json={
+        **base, "pipeline_params": [],
+    }).status_code == 422
+    assert client.post("/api/sessions/significance_test", json={
+        **base, "n_simulations": 2000, "random_seed": -1,
+    }).status_code == 422
+    assert client.post("/api/sessions/significance_test", json={
+        **base, "n_simulations": 2000, "cpu_cores": 0,
+    }).status_code == 422
+
+    route_payload = {
+        "exchange": "Binance Perpetual Futures",
+        "start_date": "2024-01-01", "finish_date": "2024-01-02",
+        "start": False,
+        "routes": [
+            {"strategy": "DashboardTrade", "symbol": "BTC-USDT", "timeframe": "1m"},
+            {"strategy": "DashboardTrade", "symbol": "ETH-USDT", "timeframe": "5m"},
+        ],
+        "data_routes": [{"symbol": "SOL-USDT", "timeframe": "15m"}],
+        "cpu_cores": 2,
+    }
+    multi = client.post("/api/sessions/backtest", json=route_payload)
+    assert multi.status_code == 200
+    multi_state = multi.json()["state"]
+    assert multi_state["strategy"] == "DashboardTrade"
+    assert multi_state["symbol"] == "BTC-USDT"
+    assert multi_state["timeframe"] == "1m"
+    assert multi_state["cpu_cores"] == 2
+    assert len(multi_state["routes"]) == 2
+    assert multi_state["data_routes"][0]["exchange"] == "Binance Perpetual Futures"
+    duplicate = {**route_payload, "routes": [route_payload["routes"][0]] * 2}
+    assert client.post("/api/sessions/backtest", json=duplicate).status_code == 422
+    mixed_exchange = {**route_payload, "routes": [
+        {**route_payload["routes"][0], "exchange": "Binance Spot"},
+    ]}
+    assert client.post("/api/sessions/backtest", json=mixed_exchange).status_code == 422
+    assert client.post("/api/sessions/significance_test", json={
+        **route_payload, "n_simulations": 2000,
     }).status_code == 422
 
     assert client.patch("/api/config", json={"starting_balance": 0}).status_code == 422
@@ -178,9 +224,15 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "tokenQuery" not in source
     assert "strategy-search')?.addEventListener('input'" in source
     assert 'class="skip-link"' in source
+    assert "function bindCodeEditor()" in source
+    assert "Ctrl/⌘+S to save" in source
+    assert "Trading Routes JSON" in source and "Data Routes JSON" in source
+    assert "JSON.parse(raw)" in source
+    assert "Candle Pipeline" in source and "pipeline_params_json" in source
     assert "prefers-reduced-motion" in styles
     assert ":focus-visible" in styles
     assert ".pill.finished" in styles
+    assert ".line-numbers" in styles and ".route-builder" in styles
 
 
 def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
@@ -207,6 +259,32 @@ def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
     csv = client.get(f"/api/session/{session['session_id']}/export?format=csv")
     assert csv.status_code == 200 and "entry_price" in csv.text
     assert client.get(f"/reports/{session['session_id']}").status_code == 200
+
+
+def test_dashboard_multiroute_backtest_runs_end_to_end(tmp_path: Path):
+    _seed_candles(tmp_path, ("BTC-USDT", "ETH-USDT", "SOL-USDT"))
+    client = TestClient(create_app(str(tmp_path)))
+    assert client.patch("/api/config", json={"warm_up_candles": 0}).status_code == 200
+    assert client.post("/api/strategies", json={
+        "name": "DashboardTrade", "content": STRATEGY,
+    }).status_code == 200
+
+    created = client.post("/api/sessions/backtest", json={
+        "exchange": "Binance Perpetual Futures",
+        "routes": [
+            {"strategy": "DashboardTrade", "symbol": "BTC-USDT", "timeframe": "1m"},
+            {"strategy": "DashboardTrade", "symbol": "ETH-USDT", "timeframe": "1m"},
+        ],
+        "data_routes": [{"symbol": "SOL-USDT", "timeframe": "15m"}],
+        "start_date": "2024-01-01", "finish_date": "2024-01-02",
+        "export_chart": False,
+    })
+    assert created.status_code == 200, created.json()
+    session = _wait_for_session(client, created.json()["session_id"])
+    assert session["status"] == "finished", session
+    assert session["results"]["metrics"]["total"] == 2
+    assert len(session["state"]["routes"]) == 2
+    assert session["state"]["data_routes"][0]["symbol"] == "SOL-USDT"
 
 
 def test_dashboard_candle_error_states_are_explicit(tmp_path: Path):
@@ -261,7 +339,8 @@ def test_indicator_and_mcp_surfaces_are_complete(tmp_path: Path):
     assert all(callable(getattr(ta, name)) for name in ta.__all__)
 
     mcp = build_server(project_root=str(tmp_path))
-    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    registered = asyncio.run(mcp.list_tools())
+    names = {tool.name for tool in registered}
     assert len(names) == 58
     assert {
         "create_strategy", "read_strategy", "write_strategy", "import_candles",
@@ -271,3 +350,8 @@ def test_indicator_and_mcp_surfaces_are_complete(tmp_path: Path):
         "create_optimization_draft", "run_optimization", "list_indicators",
         "get_indicator_details", "get_config", "update_config",
     }.issubset(names)
+    schemas = {tool.name: tool.inputSchema["properties"] for tool in registered}
+    assert {"routes", "data_routes", "cpu_cores", "pipeline_type", "pipeline_params"}.issubset(
+        schemas["create_monte_carlo_draft"])
+    assert {"routes", "data_routes", "random_seed", "cpu_cores"}.issubset(
+        schemas["create_significance_test_draft"])

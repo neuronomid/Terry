@@ -1,6 +1,5 @@
 """Global engine state store (per-backtest, reset between runs)."""
 from .candle_store import CandleStore
-from ..models import Position
 
 
 class AppState:
@@ -61,6 +60,10 @@ class Store:
         self.positions = PositionsState()
         self.orders = OrdersState()
         self.closed_trades = []
+        # Jesse exposes a per-run dictionary through Strategy.shared_vars so
+        # routes in the same simulation can communicate without leaking state
+        # into later or concurrently executing backtests.
+        self.vars = {}
 
     def reset(self):
         self.app.reset()
@@ -70,6 +73,7 @@ class Store:
         self.positions.reset()
         self.orders.reset()
         self.closed_trades = []
+        self.vars = {}
 
     # convenience
     def add_exchange(self, exchange):

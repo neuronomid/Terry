@@ -15,6 +15,7 @@ import os
 import numpy as np
 
 from .backtest import backtest
+from ._workers import parallel_results, resolve_workers
 
 TRADING_DAYS_PER_YEAR = 252
 MIN_OBSERVATIONS = 30
@@ -25,9 +26,6 @@ def rule_significance_test(config, routes, data_routes, candles, warmup_candles=
                            progress_bar=False, cpu_cores=None, progress_callback=None, *,
                            strategies_dir=None, strategy_classes=None, strategy_sources=None,
                            should_cancel=None):
-    # Terry's vectorized bootstrap already runs in bounded chunks. The compatibility
-    # arguments retain Jesse's public API without introducing a Ray dependency.
-    del cpu_cores
     if len(routes) != 1:
         raise ValueError("rule_significance_test() requires exactly one trading route.")
 
@@ -59,7 +57,7 @@ def rule_significance_test(config, routes, data_routes, candles, warmup_candles=
     resolved_seed = 42 if random_seed is None else random_seed
     sim_means = _bootstrap(rule_returns, observed_mean, n_simulations, resolved_seed,
                            progress_bar=progress_bar, progress_callback=progress_callback,
-                           should_cancel=should_cancel)
+                           should_cancel=should_cancel, cpu_cores=cpu_cores)
     p_value = float(np.mean(sim_means >= observed_mean)) if len(sim_means) else 1.0
 
     return {
@@ -77,31 +75,42 @@ def rule_significance_test(config, routes, data_routes, candles, warmup_candles=
 
 
 def _bootstrap(rule_returns, observed_mean, n_simulations, random_seed,
-               progress_bar=False, progress_callback=None, should_cancel=None):
+               progress_bar=False, progress_callback=None, should_cancel=None,
+               cpu_cores=None):
     if len(rule_returns) == 0:
         return np.array([])
+    if n_simulations < 1:
+        raise ValueError("n_simulations must be at least 1")
     centered = rule_returns - observed_mean
-    rng = np.random.default_rng(random_seed)
     n = len(centered)
-    # Bound the temporary index matrix to roughly 16 MB. A single allocation of
-    # (n_simulations, n_observations) can otherwise exhaust memory on 1m tests.
-    chunk_size = max(1, min(n_simulations, 2_000_000 // n))
+    # Bound each worker's index matrix and keep fixed chunk boundaries so a seed
+    # produces identical simulations regardless of the requested worker count.
+    chunk_size = max(1, min(n_simulations, 1024, 2_000_000 // n))
+    starts = list(range(0, n_simulations, chunk_size))
+    workers = resolve_workers(cpu_cores, len(starts))
     means = np.empty(n_simulations, dtype=float)
     progress = None
     if progress_bar:
         from tqdm import tqdm
         progress = tqdm(total=n_simulations, desc="Simulations (bootstrap)")
     try:
-        for start in range(0, n_simulations, chunk_size):
-            if should_cancel and should_cancel():
-                raise InterruptedError("Research run canceled")
+        def simulate(start):
             finish = min(start + chunk_size, n_simulations)
+            rng = np.random.default_rng(
+                np.random.SeedSequence([int(random_seed), start]))
             idx = rng.integers(0, n, size=(finish - start, n))
-            means[start:finish] = centered[idx].mean(axis=1)
+            return centered[idx].mean(axis=1)
+
+        completed = 0
+        for start, batch in parallel_results(
+                simulate, starts, workers, should_cancel):
+            finish = start + len(batch)
+            means[start:finish] = batch
+            completed += len(batch)
             if progress_callback:
-                progress_callback(finish, n_simulations)
+                progress_callback(completed, n_simulations)
             if progress:
-                progress.update(finish - start)
+                progress.update(len(batch))
     finally:
         if progress:
             progress.close()

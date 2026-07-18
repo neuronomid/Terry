@@ -14,7 +14,7 @@ def register_optimization_tools(mcp):
                                   training_finish_date: str = None,
                                   testing_start_date: str = None,
                                   testing_finish_date: str = None,
-                                  optimal_total: int = 50,
+                                  optimal_total: int = 200,
                                   objective_function: str = None, trials: int = 200,
                                   best_candidates_count: int = 20,
                                   warm_up_candles: int = None, fast_mode: bool = True,
@@ -39,12 +39,26 @@ def register_optimization_tools(mcp):
             routes, data_routes)
         if err:
             return {"error": "invalid_config", "message": err}
+        if int(optimal_total) <= 1 or int(best_candidates_count) < 1:
+            return {"error": "invalid_config", "message":
+                    "optimal_total must be greater than 1 and best_candidates_count at least 1."}
+        if ((n_trials is not None and int(n_trials) < 1)
+                or (n_trials is None and int(trials) < 1)):
+            return {"error": "invalid_config", "message": "trials must be at least 1."}
+        if not 0.1 < float(train_test_split) < 0.9:
+            return {"error": "invalid_config", "message":
+                    "train_test_split must be greater than 0.1 and less than 0.9."}
+        if cpu_cores is not None and int(cpu_cores) < 1:
+            return {"error": "invalid_config", "message":
+                    "cpu_cores must be an integer greater than 0."}
         state.update({
             "objective_function": objective_function or objective,
             "train_test_split": float(train_test_split),
             "optimal_total": int(optimal_total),
             "best_candidates_count": int(best_candidates_count),
-            "fast_mode": bool(fast_mode), "cpu_cores": cpu_cores,
+            "fast_mode": bool(fast_mode),
+            "cpu_cores": (int(cpu_cores) if cpu_cores is not None
+                          else c.default_cpu_cores()),
         })
         if n_trials is not None:
             state["n_trials"] = int(n_trials)

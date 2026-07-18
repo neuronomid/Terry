@@ -1,10 +1,17 @@
 """Shared helpers for session-based MCP tools (backtest / significance / monte_carlo / optimization)."""
 import json
+import os
+import re
 
 from ... import helpers as jh
 from ...context import get_context
 
 TERMINAL = {"finished", "stopped", "terminated", "canceled"}
+
+
+def default_cpu_cores():
+    """Match Jesse MCP's conservative local default: all-but-one, capped at four."""
+    return max(1, min((os.cpu_count() or 2) - 1, 4))
 
 
 def _default_dates(start_date, finish_date):
@@ -22,9 +29,23 @@ def build_base_state(strategy, symbol, timeframe, exchange, start_date, finish_d
     ctx = get_context()
     cfg = ctx.config.get()
     exchange = exchange or cfg["exchange"]
-    symbol = symbol or "BTC-USDT"
+    from ...data.binance import EXCHANGES
+    if exchange not in EXCHANGES:
+        return None, f"❌ Unknown exchange: {exchange}."
+    symbol = str(symbol or "BTC-USDT").upper()
+    if not re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+", symbol):
+        return None, "❌ symbol must use BASE-QUOTE format, for example BTC-USDT."
     timeframe = timeframe or "4h"
+    try:
+        jh.timeframe_to_one_minutes(timeframe)
+    except ValueError as exc:
+        return None, f"❌ {exc}"
     start_date, finish_date = _default_dates(start_date, finish_date)
+    try:
+        if jh.date_to_timestamp(finish_date) <= jh.date_to_timestamp(start_date):
+            return None, "❌ finish_date must be after start_date."
+    except (TypeError, ValueError) as exc:
+        return None, f"❌ Dates must use YYYY-MM-DD: {exc}"
     state = {
         "strategy": strategy, "symbol": symbol, "timeframe": timeframe,
         "exchange": exchange, "start_date": start_date, "finish_date": finish_date,
@@ -34,6 +55,8 @@ def build_base_state(strategy, symbol, timeframe, exchange, start_date, finish_d
             state["config"] = json.loads(config_json) if isinstance(config_json, str) else config_json
         except json.JSONDecodeError as e:
             return None, f"❌ Invalid config JSON: {e}"
+        if not isinstance(state["config"], dict):
+            return None, "❌ config must be a JSON object."
     return state, None
 
 
@@ -65,25 +88,60 @@ def build_routes_state(strategy, symbol, timeframe, exchange, start_date, finish
             if not isinstance(route, dict) or not required.issubset(route):
                 return None, (f"❌ routes[{index}] must contain strategy, symbol, and "
                               "timeframe.")
+            if not isinstance(route["strategy"], str) or not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{0,79}", route["strategy"]):
+                return None, f"❌ routes[{index}].strategy is not a valid strategy name."
         first = routes[0]
         strategy = first["strategy"]
         symbol = first["symbol"]
         timeframe = first["timeframe"]
         exchange = exchange or first.get("exchange")
-    if not strategy:
-        return None, "❌ strategy is required when routes is empty."
+    for index, route in enumerate(data_routes):
+        if not isinstance(route, dict) or not {"symbol", "timeframe"}.issubset(route):
+            return None, (f"❌ data_routes[{index}] must contain symbol and "
+                          "timeframe.")
+    if not isinstance(strategy, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,79}", strategy):
+        return None, "❌ A valid strategy name is required when routes is empty."
     state, err = build_base_state(strategy, symbol, timeframe, exchange,
                                   start_date, finish_date, config_json)
     if err:
         return None, err
     if routes:
-        for route in routes:
-            route.setdefault("exchange", state["exchange"])
-        state["routes"] = routes
+        normalized_routes = []
+        pairs = set()
+        for index, route in enumerate(routes):
+            normalized = {**route, "exchange": route.get("exchange") or state["exchange"],
+                          "symbol": str(route["symbol"]).upper()}
+            if normalized["exchange"] != state["exchange"]:
+                return None, "❌ All routes in one run must use the selected exchange."
+            if not re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+", normalized["symbol"]):
+                return None, f"❌ routes[{index}].symbol must use BASE-QUOTE format."
+            try:
+                jh.timeframe_to_one_minutes(normalized["timeframe"])
+            except ValueError as exc:
+                return None, f"❌ routes[{index}]: {exc}"
+            pair = (normalized["exchange"], normalized["symbol"])
+            if pair in pairs:
+                return None, "❌ Two trading routes cannot use the same exchange-symbol pair."
+            pairs.add(pair)
+            normalized_routes.append(normalized)
+        state["routes"] = normalized_routes
     if data_routes:
-        for route in data_routes:
-            route.setdefault("exchange", state["exchange"])
-        state["data_routes"] = data_routes
+        normalized_data_routes = []
+        for index, route in enumerate(data_routes):
+            normalized = {**route, "exchange": route.get("exchange") or state["exchange"],
+                          "symbol": str(route["symbol"]).upper()}
+            if normalized["exchange"] != state["exchange"]:
+                return None, "❌ All routes in one run must use the selected exchange."
+            if not re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+", normalized["symbol"]):
+                return None, f"❌ data_routes[{index}].symbol must use BASE-QUOTE format."
+            try:
+                jh.timeframe_to_one_minutes(normalized["timeframe"])
+            except ValueError as exc:
+                return None, f"❌ data_routes[{index}]: {exc}"
+            normalized_data_routes.append(normalized)
+        state["data_routes"] = normalized_data_routes
     return state, None
 
 

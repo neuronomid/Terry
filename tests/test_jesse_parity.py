@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import importlib
+import math
+import threading
 import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
@@ -22,7 +25,7 @@ from terry.enums import order_statuses
 from terry.models import Order
 from terry.research.ml import load_ml_model, train_model
 from terry.research.monte_carlo import monte_carlo_candles, monte_carlo_trades
-from terry.research.optimize import optimize, print_optimize_summary
+from terry.research.optimize import _score, optimize, print_optimize_summary
 from terry.research.significance import plot_significance_test, rule_significance_test
 from terry.strategy import Strategy, cached
 
@@ -211,6 +214,13 @@ def test_ml_training_artifacts_round_trip(tmp_path):
     }
     assert type(loaded["model"]).__name__ == "LogisticRegression"
     assert loaded["scaler"].n_features_in_ == 2
+    assert {"rfe_ranking", "anova_f_values", "correlations", "cv_baseline",
+            "cv_impacts", "cv_scores_without_feature", "consensus_ranks"}.issubset(
+        result["feature_importance"])
+    assert {item["feature"] for item in result["feature_impact"]} == {
+        "momentum", "volume",
+    }
+    assert all("diff" in bucket for bucket in result["calibration"])
 
 
 def test_optuna_optimizer_returns_jesse_and_terry_result_shapes():
@@ -236,7 +246,8 @@ def test_optuna_optimizer_returns_jesse_and_terry_result_shapes():
               "futures_leverage": 1, "exchange": "B", "warm_up_candles": 0}
     route = [{"exchange": "B", "symbol": "BTC-USDT", "timeframe": "1m",
               "strategy": "Tunable"}]
-    candles = candles_from_close_prices(np.linspace(100, 120, 500).tolist())
+    candles = candles_from_close_prices(
+        np.linspace(100, 120, 60 * 24 * 4).tolist())
     dataset = {"B-BTC-USDT": {
         "exchange": "B", "symbol": "BTC-USDT", "candles": candles,
     }}
@@ -249,6 +260,68 @@ def test_optuna_optimizer_returns_jesse_and_terry_result_shapes():
     assert result["best"] in result["best_trials"]
     assert {"training_metrics", "testing_metrics", "params", "dna"}.issubset(
         result["best"])
+
+
+def test_optimizer_uses_jesse_fitness_normalization_and_cpu_workers(monkeypatch):
+    metrics = {
+        "total": 10, "sharpe_ratio": 1.0, "win_rate": .5,
+        "net_profit_percentage": 3.0, "calmar_ratio": .8,
+        "max_drawdown": -2.0, "sortino_ratio": 1.1, "omega_ratio": 1.2,
+    }
+    expected = (math.log10(10) / math.log10(200)) * (1.5 / 5.5)
+    assert _score(metrics, "sharpe_ratio", 5, optimal_total=200,
+                  objective_function="sharpe") == pytest.approx(expected)
+    assert _score({**metrics, "total": 5}, "sharpe_ratio", 5,
+                  objective_function="sharpe") == 0.0001
+    assert _score({**metrics, "sharpe_ratio": -0.1}, "sharpe_ratio", 5,
+                  objective_function="sharpe") == 0.0001
+
+    class Tunable(Strategy):
+        def hyperparameters(self):
+            return [{"name": "period", "type": int, "min": 2, "max": 3,
+                     "default": 2}]
+
+        def should_long(self):
+            return False
+
+        def should_short(self):
+            return False
+
+        def go_long(self):
+            pass
+
+    barrier = threading.Barrier(2, timeout=3)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def fake_backtest(*_args, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        barrier.wait()
+        with lock:
+            active -= 1
+        return {"metrics": metrics}
+
+    module = importlib.import_module("terry.research.optimize")
+    monkeypatch.setattr(module, "backtest", fake_backtest)
+    dataset = {"B-BTC-USDT": {
+        "exchange": "B", "symbol": "BTC-USDT", "candles": np.zeros((4, 6)),
+    }}
+    result = optimize(
+        {"starting_balance": 10_000, "fee": 0, "type": "futures",
+         "futures_leverage": 1, "exchange": "B", "warm_up_candles": 0},
+        [{"exchange": "B", "symbol": "BTC-USDT", "timeframe": "1m",
+          "strategy": "Tunable"}], [], training_candles=dataset,
+        testing_candles=dataset, n_trials=2, cpu_cores=2, min_trades=5,
+        best_candidates_count=2, strategy_classes={"Tunable": Tunable},
+        progress_bar=False,
+    )
+    assert maximum == 2
+    assert result["cpu_cores"] == 2
+    assert result["completed_trials"] == 2
 
 
 def test_mcp_resource_surface_includes_optimization():

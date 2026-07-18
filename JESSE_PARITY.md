@@ -22,8 +22,8 @@ It is **not an exact replacement for the entire Jesse product**. Terry's project
 real live trading, and Jesse's live execution is distributed as a separate plugin/service rather
 than as part of the open research core. Terry therefore does not provide exchange credentials,
 multiple live accounts, real/paper order routing, live logs/notifications, or DEX execution.
-Single-process optimization and frontend implementation also differ. Those boundaries must not be
-described as full product parity.
+The worker runtime and frontend implementation also differ. Those boundaries must not be described
+as full product parity.
 
 ## Capability matrix
 
@@ -38,12 +38,12 @@ described as full product parity.
 | Research candle API | get/store/factories | Compatible | SQLite-backed `get_candles`, `store_candles`, `fake_candle`, `fake_range_candles`, and close-price factories. Terry also offers a blocking notebook import helper. |
 | Backtest exports | CSV, JSON, TradingView, charts, benchmark | Implemented | Pure API and MCP runner support CSV, JSON, Pine v5, six PNG chart outputs, logs, hyperparameters, equity curve, and buy-and-hold benchmark. |
 | Candle pipelines | Gaussian noise, Gaussian resampler, moving-block bootstrap | Implemented | Jesse-compatible pipeline classes, strategy hook, deterministic seed support, and OHLC-invariant tests. |
-| Rule significance test | Bootstrap entry-rule test | Implemented | Jesse-compatible research signature/result samples and plotting, plus draft/run/status workflow, >=2,000 simulation default, observations, p-value, and dashboard report. |
-| Monte Carlo | Candle and trade modes | Implemented | Jesse-compatible call signatures, scenario/confidence payloads, streamed callbacks, summary/plot helpers, candle block bootstrap, trade-order mode, downside/overfit verdicts, and dedicated per-scenario equity-curve retrieval. |
-| ML research/deploy | Gather, sklearn train, artifacts, inference | Core API implemented | Chronological splits, binary/multiclass/regression metrics, model/scaler artifacts, feature importance, CSV loading, lazy Strategy inference. Jesse's much richer console tables and RFE/permutation diagnostic report are not reproduced exactly. |
-| Optimization | Optuna + Ray, explicit train/test windows | API/results compatible, execution differs | Optuna TPE, hyperparameter types, trials-per-parameter, explicit OOS windows, legacy split, DNA, train/test metrics, best candidates. `cpu_cores` and `fast_mode` are accepted for compatibility; Terry currently runs single-process and has no Ray cluster. Smart objectives map to the corresponding historical Sharpe/Sortino metric rather than Jesse's richer smart-fitness internals. |
+| Rule significance test | Bootstrap entry-rule test | Implemented | Jesse-compatible research signature/result samples and plotting, plus route/data-route MCP drafts, reproducible seeds, bounded `cpu_cores` workers, >=2,000 simulation default, observations, p-value, and dashboard report. |
+| Monte Carlo | Candle and trade modes | Implemented | Jesse-compatible call signatures, concurrent isolated scenarios, route/data-route MCP drafts, pipeline controls, streamed callbacks, scenario/confidence payloads, summary/plot helpers, trade-order mode, downside/overfit verdicts, and dedicated per-scenario equity-curve retrieval. |
+| ML research/deploy | Gather, sklearn train, artifacts, inference | Core API implemented | Chronological splits, binary/multiclass/regression metrics, model/scaler artifacts, Jesse-shaped RFE/F-test/correlation/CV-removal consensus diagnostics, per-feature retraining impact, calibration bins, CSV loading, and lazy Strategy inference. Jesse's verbose console presentation is not code-identical. |
+| Optimization | Optuna + Ray, explicit train/test windows | API/results compatible, execution differs | Optuna TPE, hyperparameter types, trials-per-parameter, explicit OOS windows, legacy split, DNA, Jesse's normalized/trade-count-weighted fitness, train/test metrics, best candidates, and bounded `cpu_cores` workers. Terry uses local worker threads instead of a Ray cluster. Smart objectives remain Terry extensions mapped to their corresponding historical ratio because Jesse's audited metric payload does not emit separate smart-ratio keys. |
 | MCP | 58 tools, 12 resources | 58 tools, 12 resources | Tool names match except the expected product rename `get_jesse_status` → `get_terry_status`; all resource topics exist under `terry://`, including optimization. Draft APIs accept Terry shorthand and Jesse route/date contracts. Response envelopes remain Terry-native. |
-| Browser frontend | Nuxt/Vue, Monaco, research/live screens | Research workflow implemented, UI not code-identical | Local responsive dashboard has strategy editor, imports, settings, history, backtest/export controls, optimization, Monte Carlo, Rule Test, metrics, reports, auth, and accessibility controls. It is vanilla JS/FastAPI rather than Nuxt/Monaco, and it has no live account/execution screens. |
+| Browser frontend | Nuxt/Vue, Monaco, research/live screens | Research workflow implemented, UI not code-identical | Local responsive dashboard has an IDE-like editor with line numbers/indentation/save shortcut, multi-route and data-route inputs, worker/optimization/pipeline controls, imports, settings, history, all research modes, metrics, reports, auth, and accessibility controls. It is vanilla JS/FastAPI rather than Nuxt/Monaco, and it has no live account/execution screens. |
 | Storage/runtime | PostgreSQL, Redis, multiple services | Deliberately different | SQLite candle/session/config files and local background threads; no Redis or Postgres required. |
 | Live/paper trading | Separate plugin/product capability | Not implemented | Explicit project boundary. No credentials, account management, live orders, notifications, DEX, or multiple-account execution. |
 
@@ -63,14 +63,24 @@ described as full product parity.
 7. Aligned the complete `terry.research` export/signature surface, including Monte Carlo
    scenario/confidence results, equity-curve retrieval, significance plotting, and optimization
    summary options.
+8. Added bounded local workers for optimization, Monte Carlo, and significance; isolated
+   `Strategy.shared_vars` per engine store; and matched Jesse's optimization fitness formula.
+9. Matched Jesse's structured ML diagnostics and expanded the MCP/dashboard research forms with
+   route arrays, data routes, worker controls, reproducible seeds, and candle-pipeline settings.
+10. Upgraded the browser strategy editor with a line gutter, cursor status, auto-indentation,
+    Tab/Shift-Tab handling, and Ctrl/Command-S saving.
 
 ## Verification
 
-- Offline suite: `python -m pytest -q` — **46 passed** (engine, dashboard/API, model/util
+- Offline suite: `python -m pytest -q` — **49 passed** (engine, dashboard/API, model/util
   parity, exchange payloads, research signatures/results, ML artifacts, candle pipelines,
   optimizer, plotting, resources).
 - Dependency integrity: `python -m pip check`.
+- Package integrity: `python -m pip wheel --no-deps .` produced
+  `terry_trade-0.2.1-py3-none-any.whl` with the expected metadata.
 - Syntax integrity: `python -m compileall -q terry` and `git diff --check`.
+- Browser smoke test: headless Chrome rendered the strategy editor and Monte Carlo form with the
+  new line gutter, status bar, worker, pipeline, and advanced-route controls.
 - Public-surface audit: 174/174 indicator modules; no missing public `Strategy` or utility names;
   all 17 `terry.research` exports and their Jesse-leading argument order; 58 MCP tools and 12
   resources (with the expected Terry product-name substitutions).

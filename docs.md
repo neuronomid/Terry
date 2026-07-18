@@ -4,7 +4,7 @@ Single source of truth for connecting to and operating **Terry** over MCP. Terry
 self-contained Jesse-compatible crypto research framework: build, backtest, and stress-test
 strategies locally. Free public exchange data, SQLite storage, no cloud/keys.
 
-- **Version 0.2.0** · **174 indicator modules** · **58 MCP tools** · **12 resources**
+- **Version 0.2.1** · **174 indicator modules** · **58 MCP tools** · **12 resources**
 - **Transport:** streamable-HTTP · **URL:** `http://localhost:9021/mcp`
 - Long **and** short, spot **and** futures. Simulation only — never places real orders.
 
@@ -61,14 +61,18 @@ results.trades, results.equity_curve, dashboard_url), get_backtest_sessions(limi
 update_backtest_draft(backtest_id*, state*), update_backtest_notes(session_id*, notes*),
 cancel_backtest(session_id*), purge_backtest_sessions(days_old).
 
-Significance test: create_significance_test_draft(strategy*, symbol, timeframe, exchange, start_date, finish_date, n_simulations, hypothesis, rationale, config),
+Significance test: create_significance_test_draft(exchange, routes, data_routes, start_date,
+finish_date, n_simulations, random_seed, title, description, strategy_summary, hypothesis,
+rationale, plus Terry shorthand strategy/symbol/timeframe/config and cpu_cores),
 run_significance_test(session_id*), get_significance_test_session(session_id*)
 (-> results.results = {observed_mean, annualized_return, p_value, n_simulations, n_observations,
 significant, verdict}), plus get_significance_test_sessions / update_significance_test_draft /
 update_significance_test_notes / cancel_significance_test / purge_significance_test_sessions.
 Interpret p_value: <0.05 significant; 0.05-0.10 borderline; >0.10 hard stop (random).
 
-Monte Carlo: create_monte_carlo_draft(strategy*, symbol, timeframe, exchange, start_date, finish_date, num_scenarios, run_candles, run_trades, config)
+Monte Carlo: create_monte_carlo_draft(exchange, routes, data_routes, start_date, finish_date,
+num_scenarios, run_trades, run_candles, fast_mode, cpu_cores, pipeline_type, pipeline_params,
+notes fields; Terry shorthand strategy/symbol/timeframe/config is also accepted)
 (defaults num_scenarios=200, run_candles=True, run_trades=False), run_monte_carlo(session_id*),
 get_monte_carlo_session(session_id*) (-> results.candles.summary_metrics + overfit_verdict,
 results.trades.max_drawdown if run_trades), get_monte_carlo_equity_curves(session_id*),
@@ -200,11 +204,13 @@ The audit baseline is Jesse 2.5.0 commit `fa63531cae6c09b978711dc1892285067304e2
 method/property names, 58 MCP tool names (with Terry product naming for status), and 12 resource
 topics. `size_to_qty` now uses Jesse's three-fee reserve and precision floor. Research includes ML,
 candle pipelines, benchmark and export formats, chart packs, multi-route/data-route backtests, and
-Optuna train/test optimization. See [JESSE_PARITY.md](JESSE_PARITY.md) for evidence and differences.
+Optuna train/test optimization. Research workers honor cpu_cores locally; the dashboard exposes
+route/data-route JSON, Monte Carlo pipelines, optimization controls, and an IDE-like editor. See
+[JESSE_PARITY.md](JESSE_PARITY.md) for evidence and differences.
 
 This is research compatibility, not total product parity: Terry deliberately uses SQLite and a
-local FastAPI/JavaScript dashboard, runs optimization in one process, and does not contain Jesse's
-separate live/paper exchange-execution plugin, account management, or live notifications.
+local FastAPI/JavaScript dashboard, uses bounded local threads instead of Ray, and does not contain
+Jesse's separate live/paper exchange-execution plugin, account management, or live notifications.
 
 Dashboard API requests are same-origin, use strict validation and security headers, and can be
 protected by an HttpOnly same-site session cookie via `TERRY_DASHBOARD_PASSWORD`.
@@ -219,6 +225,8 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
+- 0.2.1 — concurrent local research workers; Jesse fitness and ML diagnostics; isolated shared
+  strategy state; route/data-route and pipeline parity in MCP/dashboard; IDE-like browser editor.
 - 0.2.0 — Jesse 2.5 audit; strategy/model/util compatibility fixes; candle pipelines and ML;
   charts, benchmark, CSV/JSON/Pine exports; Optuna OOS optimization; multi-route MCP drafts;
   10 historical exchange drivers; 12th optimization resource; parity regression suite.

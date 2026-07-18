@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
+import math
 
 import numpy as np
 import optuna
+from tqdm import tqdm
 
 from .backtest import backtest
+from ._workers import resolve_strategy_classes, resolve_workers
 
 _OBJECTIVES = {
     "sharpe": "sharpe_ratio", "sharpe_ratio": "sharpe_ratio",
@@ -19,6 +23,17 @@ _OBJECTIVES = {
     "smart sharpe": "sharpe_ratio", "smart_sharpe": "sharpe_ratio",
     "smart sortino": "sortino_ratio", "smart_sortino": "sortino_ratio",
     "net_profit_percentage": "net_profit_percentage",
+}
+_FITNESS_RANGES = {
+    "sharpe": (-0.5, 5), "sharpe_ratio": (-0.5, 5),
+    "calmar": (-0.5, 30), "calmar_ratio": (-0.5, 30),
+    "sortino": (-0.5, 15), "sortino_ratio": (-0.5, 15),
+    "omega": (-0.5, 5), "omega_ratio": (-0.5, 5),
+    "serenity": (-0.5, 15), "serenity_index": (-0.5, 15),
+    "smart sharpe": (-0.5, 5), "smart_sharpe": (-0.5, 5),
+    "smart sortino": (-0.5, 15), "smart_sortino": (-0.5, 15),
+    # Terry's dashboard has historically offered this additional objective.
+    "net_profit_percentage": (-0.5, 100),
 }
 
 
@@ -44,9 +59,10 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
     remain accepted for Terry's single-window dashboard and are converted to a
     chronological train/test split.
     """
-    del optimal_total, fast_mode, cpu_cores, progress_bar
     if not routes:
         raise ValueError("At least one route is required.")
+    if optimal_total <= 1:
+        raise ValueError("optimal_total must be greater than 1")
     data_routes = data_routes or []
     flat_config, routes, data_routes = _normalize_config_and_routes(config, routes, data_routes)
     training_candles = training_candles or candles or {}
@@ -63,8 +79,12 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
             f"Choose one of: {', '.join(sorted(_OBJECTIVES))}."
         ) from exc
 
+    strategy_classes = resolve_strategy_classes(
+        routes, strategies_dir, strategy_classes, strategy_sources)
+    strategies_dir = None
+    strategy_sources = None
     if hp_space is None:
-        hp_space = _discover_hp(routes, strategies_dir, strategy_classes, strategy_sources)
+        hp_space = _discover_hp(routes, None, strategy_classes, None)
     if not hp_space:
         raise ValueError("The strategy defines no hyperparameters() to optimize.")
 
@@ -76,6 +96,7 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
     if total_trials < 1:
         raise ValueError("trials must be at least 1")
     best_candidates_count = max(1, int(best_candidates_count))
+    workers = resolve_workers(cpu_cores, total_trials)
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
@@ -83,66 +104,91 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
     completed = []
     failures = []
 
-    for index in range(total_trials):
-        if should_cancel and should_cancel():
-            raise InterruptedError("Research run canceled")
-        trial = study.ask()
-        parameters = {item["name"]: _suggest(trial, item) for item in hp_space}
-        try:
-            training_metrics = backtest(
-                flat_config, routes, data_routes, training_candles,
-                warmup_candles=training_warmup_candles,
-                hyperparameters=parameters, strategies_dir=strategies_dir,
-                strategy_classes=strategy_classes, strategy_sources=strategy_sources,
-                should_cancel=should_cancel,
+    def evaluate(parameters):
+        training_metrics = backtest(
+            flat_config, routes, data_routes, training_candles,
+            warmup_candles=training_warmup_candles,
+            hyperparameters=parameters, fast_mode=fast_mode,
+            strategy_classes=strategy_classes, should_cancel=should_cancel,
+        )["metrics"]
+        score = _score(
+            training_metrics, metric_key, min_trades,
+            optimal_total=optimal_total, objective_function=objective_function,
+        )
+        testing_metrics = {}
+        if score > 0.0001:
+            testing_metrics = backtest(
+                flat_config, routes, data_routes, testing_candles,
+                warmup_candles=testing_warmup_candles,
+                hyperparameters=parameters, fast_mode=fast_mode,
+                strategy_classes=strategy_classes, should_cancel=should_cancel,
             )["metrics"]
-            score = _score(training_metrics, metric_key, min_trades)
-            study.tell(trial, score)
-            completed.append({
-                "trial": index, "params": parameters, "fitness": score,
-                "training_metrics": training_metrics,
-            })
-        except InterruptedError:
-            raise
-        except Exception as exc:
-            study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            failures.append(f"{type(exc).__name__}: {exc}")
-        if progress_callback:
-            progress_callback(index + 1, total_trials)
+        return score, training_metrics, testing_metrics
+
+    bar = tqdm(total=total_trials, disable=not progress_bar,
+               desc="Optimizing", unit="trial")
+    next_trial = 0
+    pending = {}
+    done_count = 0
+    try:
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="terry-optimize") as executor:
+            while done_count < total_trials:
+                _check_canceled(should_cancel)
+                while len(pending) < workers and next_trial < total_trials:
+                    trial = study.ask()
+                    parameters = {
+                        item["name"]: _suggest(trial, item) for item in hp_space
+                    }
+                    future = executor.submit(evaluate, parameters)
+                    pending[future] = (next_trial, trial, parameters)
+                    next_trial += 1
+                if not pending:
+                    break
+                ready, _ = wait(pending, return_when=FIRST_COMPLETED, timeout=0.25)
+                if not ready:
+                    continue
+                for future in ready:
+                    index, trial, parameters = pending.pop(future)
+                    try:
+                        score, training_metrics, testing_metrics = future.result()
+                        study.tell(trial, score)
+                        completed.append({
+                            "trial": index, "params": parameters,
+                            "fitness": score,
+                            "training_metrics": training_metrics,
+                            "testing_metrics": testing_metrics,
+                        })
+                    except InterruptedError:
+                        raise
+                    except Exception as exc:
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                        failures.append(f"{type(exc).__name__}: {exc}")
+                    done_count += 1
+                    bar.update(1)
+                    if progress_callback:
+                        progress_callback(done_count, total_trials)
+    finally:
+        bar.close()
 
     if not completed:
         detail = failures[0] if failures else "no trial result was produced"
         raise RuntimeError(f"All optimization trials failed. First error: {detail}")
     completed.sort(key=lambda item: item["fitness"], reverse=True)
-    selected = completed[:min(best_candidates_count, len(completed))]
+    selected = [item for item in completed if item["fitness"] > 0.0001]
+    selected = selected[:min(best_candidates_count, len(selected))]
     for rank, candidate in enumerate(selected, 1):
-        if should_cancel and should_cancel():
-            raise InterruptedError("Research run canceled")
-        try:
-            testing_metrics = backtest(
-                flat_config, routes, data_routes, testing_candles,
-                warmup_candles=testing_warmup_candles,
-                hyperparameters=candidate["params"], strategies_dir=strategies_dir,
-                strategy_classes=strategy_classes, strategy_sources=strategy_sources,
-                should_cancel=should_cancel,
-            )["metrics"]
-        except InterruptedError:
-            raise
-        except Exception as exc:
-            testing_metrics = None
-            candidate["testing_error"] = f"{type(exc).__name__}: {exc}"
+        testing_metrics = candidate["testing_metrics"]
         candidate.update({
             "rank": rank,
             "dna": _encode_dna(candidate["params"]),
-            "testing_metrics": testing_metrics,
         })
         # Backward-compatible fields used by Terry's current dashboard/report.
         candidate.update({
             "hp": candidate["params"], "train_score": candidate["fitness"],
             "train_metrics": _slim(candidate["training_metrics"]),
-            "test_score": (_score(testing_metrics, metric_key, 0)
-                           if testing_metrics is not None else None),
-            "test_metrics": _slim(testing_metrics) if testing_metrics is not None else None,
+            "test_score": _metric_value(testing_metrics, metric_key),
+            "test_metrics": _slim(testing_metrics),
         })
 
     return {
@@ -156,6 +202,7 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
         "n_trials": len(completed),
         "best": selected[0] if selected else None,
         "candidates": selected,
+        "cpu_cores": workers,
     }
 
 
@@ -210,11 +257,32 @@ def _suggest(trial, parameter):
     raise ValueError(f"Unsupported hyperparameter type: {kind}")
 
 
-def _score(metrics, objective, min_trades):
-    if metrics is None or metrics.get("total", 0) < min_trades:
-        return -1e18
+def _score(metrics, objective, min_trades, *, optimal_total=200,
+           objective_function=None):
+    """Return Jesse's trade-count weighted, normalized optimization fitness."""
+    if metrics is None or metrics.get("total", 0) <= min_trades:
+        return 0.0001
+    ratio = _metric_value(metrics, objective)
+    if ratio is None or ratio < 0:
+        return 0.0001
+    name = objective_function or objective
+    low, high = _FITNESS_RANGES[name]
+    total_effect_rate = min(
+        math.log10(float(metrics["total"])) / math.log10(float(optimal_total)), 1.0)
+    score = total_effect_rate * ((ratio - low) / (high - low))
+    return float(score) if np.isfinite(score) else 0.0001
+
+
+def _metric_value(metrics, objective):
+    if not metrics:
+        return None
     value = metrics.get(objective)
-    return float(value) if value is not None and np.isfinite(value) else -1e18
+    return float(value) if value is not None and np.isfinite(value) else None
+
+
+def _check_canceled(should_cancel):
+    if should_cancel and should_cancel():
+        raise InterruptedError("Research run canceled")
 
 
 def _discover_hp(routes, strategies_dir, strategy_classes, strategy_sources):

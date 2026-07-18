@@ -664,7 +664,7 @@ class Strategy(ABC):
 
     @property
     def shared_vars(self) -> dict:
-        return _SHARED_VARS
+        return self.store.vars
 
     # ================================================================= misc
     @staticmethod
@@ -687,10 +687,6 @@ class Strategy(ABC):
                                            line_width=1.5, line_style="solid"):
         self._chart_lines.append(("extra_hline", chart_name, title, value, color,
                                   line_width, line_style))
-
-
-_SHARED_VARS = {}
-
 
 def _class_label(value):
     """Preserve numeric/string sklearn class labels while unboxing NumPy scalars."""

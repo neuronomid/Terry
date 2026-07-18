@@ -44,7 +44,7 @@ iterates with small changes, runs Monte Carlo, and writes a Markdown report — 
 | Data source | Binance/Bybit/… drivers | **Same 10 historical backtest markets** through public REST |
 | "Dashboard URL" | live Vue dashboard | **responsive local dashboard + self-contained HTML report** per session |
 | Live trading | paid plugin | **out of scope** (documented as future; safety) |
-| Optimization | Optuna + Ray | **Optuna TPE**, chronological train/test validation, single process |
+| Optimization | Optuna + Ray | **Optuna TPE**, chronological train/test validation, bounded local workers |
 
 **Fidelity target:** an agent using Jesse's workflow should be able to drive Terry with the
 same tool calls and get results with the same shape and meaning. The engine is validated
@@ -132,4 +132,4 @@ tests/                 unit + end-to-end MCP tests
 Real live/paper exchange execution, exchange-account management, and live notifications remain out
 of scope. Jesse distributes live execution separately from its open research core. Terry uses
 SQLite instead of PostgreSQL/Redis, a local FastAPI/vanilla-JavaScript dashboard instead of Jesse's
-Nuxt frontend, and a single-process Optuna runner rather than Ray. See `JESSE_PARITY.md`.
+Nuxt frontend, and bounded local worker threads rather than a Ray cluster. See `JESSE_PARITY.md`.

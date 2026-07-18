@@ -79,7 +79,10 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
   ML gather/deploy helpers and candle pipelines.
 - **Research tools** — Rule Significance Test (bootstrap p-value), Monte Carlo (overfit/robustness),
   ML training, backtest exports/charts/benchmarking, and Optuna optimization with out-of-sample
-  validation.
+  validation. CPU controls drive bounded local workers for significance, Monte Carlo, and
+  optimization.
+- **Research dashboard** — IDE-like strategy editor plus multi-route/data-route, pipeline,
+  optimization, export, and robustness controls.
 - **58 MCP tools + 12 resources** — tools for strategy creation, data import, configuration,
   backtesting, and analysis.
 - **Free data + local storage** — 10 Jesse backtest exchanges through public REST + SQLite.

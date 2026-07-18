@@ -117,6 +117,47 @@ def test_backtest_returns_44_metrics():
     assert res["metrics"]["total"] > 0
 
 
+def test_shared_vars_are_shared_within_a_run_and_isolated_between_runs():
+    observations = []
+
+    class SharedStateStrategy(Strategy):
+        def before(self):
+            if self.index == 1:
+                self.shared_vars.setdefault("routes", []).append(self.symbol)
+                observations.append((self.symbol, self.shared_vars["routes"]))
+
+        def should_long(self):
+            return False
+
+        def should_short(self):
+            return False
+
+        def go_long(self):
+            pass
+
+    candles = _trend_candles(120)
+    candle_map = {
+        "B-BTC-USDT": {"exchange": "B", "symbol": "BTC-USDT", "candles": candles},
+        "B-ETH-USDT": {"exchange": "B", "symbol": "ETH-USDT", "candles": candles},
+    }
+    routes = [
+        {"exchange": "B", "symbol": symbol, "timeframe": "1m",
+         "strategy": "SharedStateStrategy"}
+        for symbol in ("BTC-USDT", "ETH-USDT")
+    ]
+    kwargs = {"config": FUT_CONFIG, "routes": routes, "candles": candle_map,
+              "strategy_classes": {"SharedStateStrategy": SharedStateStrategy}}
+    backtest(**kwargs)
+    backtest(**kwargs)
+
+    assert observations == [
+        ("BTC-USDT", ["BTC-USDT", "ETH-USDT"]),
+        ("ETH-USDT", ["BTC-USDT", "ETH-USDT"]),
+        ("BTC-USDT", ["BTC-USDT", "ETH-USDT"]),
+        ("ETH-USDT", ["BTC-USDT", "ETH-USDT"]),
+    ]
+
+
 def test_metric_keys_match_jesse():
     res = _run(SmaCross)
     expected = {"total", "win_rate", "net_profit", "net_profit_percentage", "starting_balance",
