@@ -56,8 +56,7 @@ class Importer:
                 if len(chunk) == 0:
                     cursor += window
                     continue
-                self.db.store(exchange, symbol, chunk)
-                imported["n"] += len(chunk)
+                imported["n"] += self.db.store(exchange, symbol, chunk)
                 cursor = int(chunk[-1][0]) + ONE_MIN_MS
                 pct = int(min((cursor - start_ts) / max(finish_ts - start_ts, 1), 1.0) * 100)
                 self._update(import_id, progress=pct, candles_imported=imported["n"])

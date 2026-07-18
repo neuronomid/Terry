@@ -21,6 +21,10 @@ class InvalidDateRange(TerryException):
     pass
 
 
+class InvalidTimeframe(TerryException):
+    pass
+
+
 class CandleNotFoundInDatabase(TerryException):
     pass
 

@@ -1,6 +1,6 @@
 """Terry — a local, self-contained MCP-server clone of the Jesse crypto trading framework."""
 from .version import __version__
-from .strategy import Strategy
+from .strategy import Strategy, cached
 from . import indicators
 from . import utils
 from . import helpers
@@ -14,6 +14,7 @@ import types as _types
 
 _strategies_shim = _types.ModuleType("terry.strategies")
 _strategies_shim.Strategy = Strategy
+_strategies_shim.cached = cached
 _sys.modules.setdefault("terry.strategies", _strategies_shim)
 
-__all__ = ["Strategy", "indicators", "utils", "helpers", "__version__"]
+__all__ = ["Strategy", "cached", "indicators", "utils", "helpers", "__version__"]

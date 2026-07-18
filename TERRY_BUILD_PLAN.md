@@ -38,13 +38,13 @@ iterates with small changes, runs Monte Carlo, and writes a Markdown report — 
 | Storage | PostgreSQL + Redis | **SQLite** (zero-config, local, free) |
 | Process model | Dashboard :9000 + MCP :9002 (HTTP) | **Local FastAPI dashboard :9020 + MCP :9021**; both call the same engine directly |
 | Transport | FastMCP streamable-http :9002 | **Same** (FastMCP streamable-http, default port 9021) |
-| Tool surface | ~56 tools, `run_*` credit-gated | **Same tool names/semantics, ungated (free/unlimited)** |
+| Tool surface | 58 tools in audited Jesse 2.5 | **58 names** (product status renamed Terry), ungated |
 | Strategy API | `Strategy` base class | **Same API** (drop-in compatible source) |
 | Metrics | 44-key dict | **Same keys/definitions** (validated vs Jesse) |
-| Data source | Binance/Bybit/… drivers | **Binance public REST** (no API key) + pluggable |
+| Data source | Binance/Bybit/… drivers | **Same 10 historical backtest markets** through public REST |
 | "Dashboard URL" | live Vue dashboard | **responsive local dashboard + self-contained HTML report** per session |
 | Live trading | paid plugin | **out of scope** (documented as future; safety) |
-| Optimization | Optuna + Ray | **Optuna** (random/TPE), in-process multiprocessing |
+| Optimization | Optuna + Ray | **Optuna TPE**, chronological train/test validation, single process |
 
 **Fidelity target:** an agent using Jesse's workflow should be able to drive Terry with the
 same tool calls and get results with the same shape and meaning. The engine is validated
@@ -71,14 +71,19 @@ terry/
   strategy.py          Strategy base class (the developer API)
   loader.py            load strategy class from strategies/<Name>/__init__.py
   data/
-    binance.py         Binance public /klines fetcher
+    binance.py         public candle-driver registry (keeps legacy module name)
     storage.py         SQLite candle store (dedup, coverage queries)
     importer.py        import orchestration + progress tracking
   research/
     backtest.py        backtest() pure function
     significance.py    rule_significance_test() (bootstrap)
     monte_carlo.py     monte_carlo candles + trades
-    optimize.py        optimize() via Optuna
+    optimize.py        Optuna TPE + out-of-sample candidate validation
+    candles.py         notebook candle get/store/factory API
+    ml.py              gather/train/load/deploy ML artifacts
+    charts.py          PNG backtest chart pack
+    exports.py         CSV/JSON/TradingView Pine exports
+  candle_pipelines/    Gaussian noise/resampling + moving-block bootstrap
   sessions/
     db.py              SQLite session store: drafts/sessions/results/notes
     runner.py          background thread runner for backtest/mc/rst/opt
@@ -100,11 +105,11 @@ tests/                 unit + end-to-end MCP tests
 
 1. **Scaffold**: package, venv, requirements, CLI, config.
 2. **Core models**: Candle/Order/Position/ClosedTrade/Route + helpers/enums/exceptions.
-3. **Indicators**: ~40 indicators with `sequential`/`source_type` and named-tuple multiline.
+3. **Indicators**: all 174 public Jesse 2.5 modules with sequential/source behavior.
 4. **Engine**: store → exchange → broker → candle_store → simulator → metrics.
 5. **Strategy base class**: full lifecycle + `self.*` API + sizing/exits.
-6. **Data layer**: Binance fetch + SQLite storage + importer with progress.
-7. **Research funcs**: backtest, significance, monte_carlo, optimize.
+6. **Data layer**: ten Jesse historical markets + SQLite storage + progress importer.
+7. **Research funcs**: backtest, exports/charts, candles, ML, significance, Monte Carlo, optimize.
 8. **Sessions**: SQLite store + background runner + HTML report.
 9. **MCP server**: FastMCP streamable-http + all tools + resources + AGENTS.md.
 10. **Tests**: unit (engine/indicators/metrics/sizing) + end-to-end (MCP tool flow) +
@@ -122,8 +127,9 @@ tests/                 unit + end-to-end MCP tests
 - Cross-check: run the same synthetic scenario through Jesse (installed in scratchpad) and
   Terry; confirm metric definitions and directional agreement.
 
-## 6. Out of scope (documented, not built)
+## 6. Deliberate differences / remaining scope
 
-Real live/paper trading against exchanges; ML pipeline;
-100% of Jesse's 300+ indicators (Terry ships the common ~40, easily extended);
-multi-process Ray cluster (Terry uses local multiprocessing/threads).
+Real live/paper exchange execution, exchange-account management, and live notifications remain out
+of scope. Jesse distributes live execution separately from its open research core. Terry uses
+SQLite instead of PostgreSQL/Redis, a local FastAPI/vanilla-JavaScript dashboard instead of Jesse's
+Nuxt frontend, and a single-process Optuna runner rather than Ray. See `JESSE_PARITY.md`.

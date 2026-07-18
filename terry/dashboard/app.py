@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import math
 import os
 import re
@@ -33,7 +32,11 @@ _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
 _SYMBOL = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 _STATIC = Path(__file__).with_name("static")
 _AUTH_COOKIE = "terry_dashboard_session"
-_OBJECTIVES = {"sharpe_ratio", "sortino_ratio", "calmar_ratio", "net_profit_percentage"}
+_OBJECTIVES = {
+    "sharpe", "sharpe_ratio", "sortino", "sortino_ratio", "calmar", "calmar_ratio",
+    "omega", "omega_ratio", "serenity", "serenity_index", "smart sharpe",
+    "smart sortino", "net_profit_percentage",
+}
 _SESSION_KINDS = ("backtest", "optimization", "monte_carlo", "significance_test")
 _ENGINE_CONFIG_KEYS = {
     "starting_balance", "fee", "type", "futures_leverage", "futures_leverage_mode",
@@ -170,6 +173,10 @@ class {name}(Strategy):
 
 def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
     result = _clean_json(dict(session))
+    if isinstance(result.get("results"), dict):
+        # Dedicated MCP retrieval exposes downsampled Monte Carlo curves. Avoid
+        # transferring every scenario on normal dashboard polling/history calls.
+        result["results"].pop("equity_curves", None)
     result["session_id"] = result.pop("id")
     result["dashboard_url"] = (result.get("results") or {}).get("dashboard_url", "")
     return result
@@ -247,7 +254,8 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         "significance_test": {"n_simulations", "hypothesis", "rationale"},
         "monte_carlo": {"num_scenarios", "run_candles", "run_trades"},
         "optimization": {"n_trials", "train_test_split", "objective"},
-        "backtest": set(),
+        "backtest": {"debug_mode", "export_csv", "export_json", "export_chart",
+                     "export_tradingview", "fast_mode", "benchmark"},
     }[kind]
     unknown = set(payload) - allowed
     if unknown:
@@ -281,6 +289,13 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
             raise _error(422, f"objective must be one of: {', '.join(sorted(_OBJECTIVES))}.")
         state.update({"objective": objective, "n_trials": trials,
                       "train_test_split": split})
+    elif kind == "backtest":
+        for field, default in {
+            "debug_mode": False, "export_csv": False, "export_json": False,
+            "export_chart": True, "export_tradingview": False,
+            "fast_mode": True, "benchmark": True,
+        }.items():
+            state[field] = _boolean(payload.get(field, default), field)
     start = _boolean(payload.get("start", True), "start")
     sid = ctx.sessions.create(kind, state, notes=notes)
     session = ctx.sessions.get(sid)

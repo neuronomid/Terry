@@ -1,5 +1,4 @@
 """Helper functions — a focused analog of jesse.helpers (jh)."""
-import hashlib
 import random
 import string
 import uuid
@@ -7,15 +6,14 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .enums import timeframes
-
 # ---------------------------------------------------------------------------
 # Timeframe math
 # ---------------------------------------------------------------------------
 _TF_MINUTES = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "45m": 45,
     "1h": 60, "2h": 120, "3h": 180, "4h": 240, "6h": 360, "8h": 480,
-    "12h": 720, "1D": 1440, "3D": 4320, "1W": 10080,
+    "12h": 720, "1D": 1440, "1d": 1440, "3D": 4320, "3d": 4320,
+    "1W": 10080, "1w": 10080, "1M": 43_200,
 }
 
 
@@ -136,7 +134,11 @@ def floor_with_precision(num: float, precision: int = 0) -> float:
 def prepare_qty(qty, side: str) -> float:
     if side.lower() in ("sell", "short"):
         return -abs(qty)
-    return abs(qty)
+    if side.lower() in ("buy", "long"):
+        return abs(qty)
+    if side.lower() == "close":
+        return 0.0
+    raise ValueError(f"{side} is not a valid input")
 
 
 def np_shift(arr: np.ndarray, num: int, fill_value=0) -> np.ndarray:

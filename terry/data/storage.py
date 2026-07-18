@@ -49,12 +49,13 @@ class CandleDB:
         conn = self._conn()
         data = [(exchange, symbol, int(r[0]), float(r[1]), float(r[2]),
                  float(r[3]), float(r[4]), float(r[5])) for r in rows]
+        before = conn.total_changes
         conn.executemany(
             "INSERT OR IGNORE INTO candles_1m "
             "(exchange, symbol, timestamp, open, close, high, low, volume) "
             "VALUES (?,?,?,?,?,?,?,?)", data)
         conn.commit()
-        return len(data)
+        return conn.total_changes - before
 
     # ------------------------------------------------------------------ read
     def get(self, exchange, symbol, start_ts=None, finish_ts=None):

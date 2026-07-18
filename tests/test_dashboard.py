@@ -140,6 +140,7 @@ def test_dashboard_rejects_malformed_research_and_config_payloads(tmp_path: Path
     assert client.post("/api/sessions/backtest", json={**base, "hyperparameters": []}).status_code == 422
     assert client.post("/api/sessions/backtest", json={**base, "start": "false"}).status_code == 422
     assert client.post("/api/sessions/backtest", json={**base, "typo_field": True}).status_code == 422
+    assert client.post("/api/sessions/backtest", json={**base, "benchmark": "yes"}).status_code == 422
     assert client.get("/api/sessions/backtest").json()["total"] == 0
     assert client.post("/api/sessions/optimization", json={**base, "n_trials": "many"}).status_code == 422
     assert client.post("/api/sessions/optimization", json={**base, "objective": "made_up"}).status_code == 422
@@ -196,6 +197,8 @@ def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
     session = _wait_for_session(client, created.json()["session_id"])
     assert session["status"] == "finished", session
     assert session["results"]["metrics"]["total"] >= 1
+    assert session["results"]["benchmark"]["return_percentage"] > 0
+    assert Path(session["results"]["charts_folder"]).is_dir()
 
     listed = client.get("/api/sessions/backtest?query=DashboardTrade").json()
     assert listed["total"] == 1

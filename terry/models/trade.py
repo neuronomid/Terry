@@ -2,6 +2,7 @@ import numpy as np
 
 from .. import helpers as jh
 from ..enums import trade_types
+from ._compat import CallableDict
 
 
 class ClosedTrade:
@@ -56,7 +57,6 @@ class ClosedTrade:
 
     @property
     def fee(self) -> float:
-        rate = 0.0
         # fee is computed from the exchange fee rate captured at close time
         return float(self._fee)
 
@@ -89,14 +89,35 @@ class ClosedTrade:
         return float((self.pnl / (self.size / self.leverage)) * 100)
 
     @property
+    def total_cost(self) -> float:
+        return self.entry_price * abs(self.qty) / self.leverage
+
+    @property
+    def is_long(self) -> bool:
+        return self.type == trade_types.LONG
+
+    @property
+    def is_short(self) -> bool:
+        return self.type == trade_types.SHORT
+
+    @property
+    def is_open(self) -> bool:
+        return self.opened_at is not None
+
+    @property
+    def current_qty(self) -> float:
+        return float(sum(order.qty for order in self.orders if order.is_executed))
+
+    @property
     def holding_period(self) -> int:
         """Seconds the trade was held."""
         if self.opened_at is None or self.closed_at is None:
             return 0
         return int((self.closed_at - self.opened_at) / 1000)
 
+    @property
     def to_dict(self) -> dict:
-        return {
+        return CallableDict({
             "id": self.id,
             "strategy_name": self.strategy_name,
             "symbol": self.symbol,
@@ -113,6 +134,16 @@ class ClosedTrade:
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
             "orders": [o.to_dict() for o in self.orders],
-        }
+        })
+
+    @property
+    def to_json(self) -> dict:
+        result = self.to_dict()
+        result.pop("orders", None)
+        return result
+
+    @property
+    def to_dict_with_orders(self) -> dict:
+        return self.to_dict()
 
     _fee = 0.0

@@ -1,10 +1,10 @@
 # Terry — Agent & Usage Documentation
 
 Single source of truth for connecting to and operating **Terry** over MCP. Terry is a local,
-self-contained clone of the [Jesse](https://jesse.trade) crypto trading framework: research, build,
-backtest, and stress-test strategies locally. Free Binance data, SQLite storage, no cloud/keys.
+self-contained Jesse-compatible crypto research framework: build, backtest, and stress-test
+strategies locally. Free public exchange data, SQLite storage, no cloud/keys.
 
-- **Version 0.1.0** · **174 indicators** (full Jesse parity) · **58 MCP tools** · **11 resources**
+- **Version 0.2.0** · **174 indicator modules** · **58 MCP tools** · **12 resources**
 - **Transport:** streamable-HTTP · **URL:** `http://localhost:9021/mcp`
 - Long **and** short, spot **and** futures. Simulation only — never places real orders.
 
@@ -53,7 +53,9 @@ delete_candles(exchange*, symbol*); clear_candle_cache().
 
 Indicators: list_indicators(), get_indicator_details(indicator_name*).
 
-Backtest: create_backtest_draft(strategy*, symbol, timeframe, exchange, start_date, finish_date, config),
+Backtest: create_backtest_draft(strategy, symbol, timeframe, exchange, start_date, finish_date,
+config, routes, data_routes, debug_mode, export_csv, export_json, export_chart,
+export_tradingview, fast_mode, benchmark),
 run_backtest(session_id*), get_backtest_session(session_id*) (-> results.metrics 44 keys,
 results.trades, results.equity_curve, dashboard_url), get_backtest_sessions(limit),
 update_backtest_draft(backtest_id*, state*), update_backtest_notes(session_id*, notes*),
@@ -75,8 +77,11 @@ get_monte_carlo_sessions / update_monte_carlo_draft / update_monte_carlo_notes /
 terminate_monte_carlo / purge_monte_carlo_sessions. Overfit (sharpe): original>best_5 ->
 overfit_suspect; original<=median -> robust; report worst_5.
 
-Optimization: create_optimization_draft(strategy*, symbol, timeframe, exchange, start_date, finish_date, objective, n_trials, train_test_split, config)
-(needs hyperparameters(); objective default sharpe_ratio, split 0.75),
+Optimization: create_optimization_draft(...) accepts Terry's strategy/symbol/start/finish shorthand
+or Jesse-style JSON routes/data_routes with separate training_start_date/training_finish_date and
+testing_start_date/testing_finish_date. It also accepts objective_function, trials per
+hyperparameter, best_candidates_count, warm_up_candles, fast_mode, and cpu_cores. The strategy
+must define hyperparameters().
 run_optimization(session_id*), get_optimization_session(session_id*) (-> results.best {hp,
 train_score, test_score, ...} and results.candidates validated out-of-sample),
 rerun_optimization(session_id*), get_optimization_logs(session_id*), plus
@@ -90,7 +95,8 @@ objective/n_trials/train_test_split · hyperparameters.
 ## 6. Resources
 terry://strategy, terry://strategy_examples, terry://indicator, terry://position_risk,
 terry://utilities, terry://backtest_management, terry://backtest_metrics, terry://candle,
-terry://configuration, terry://significance_test, terry://monte_carlo.
+terry://configuration, terry://significance_test, terry://monte_carlo,
+terry://optimization.
 
 ## 7. Writing strategies
 Class in strategies/<Name>/__init__.py; methods run once per candle after close (no look-ahead).
@@ -131,7 +137,7 @@ Class in strategies/<Name>/__init__.py; methods run once per candle after close 
 - Hyperparameters (for optimization): hyperparameters() -> list of
   {name, type(int|float|"categorical"), min, max, step?, options?, default}; read via self.hp[name].
 
-## 8. Indicators (174, full Jesse parity)
+## 8. Indicators (174 modules, matching Jesse 2.5's public module set)
 
     import terry.indicators as ta
     v = ta.sma(self.candles, 20)                    # latest scalar
@@ -159,8 +165,10 @@ willr, wma, wt, zlema, zscore. beta/rsmk take a second candle series.
 Keys: exchange, starting_balance, fee, type("futures"|"spot"), futures_leverage,
 futures_leverage_mode("cross"|"isolated"), quote_asset, warm_up_candles, plus optimization,
 monte_carlo, significance_test sub-objects. A session's exchange sets its market type unless
-overridden in its config. Exchanges: Binance Perpetual Futures, Binance USDT Perpetual, Binance
-Spot, Binance, Binance US Spot.
+overridden in its config. Historical drivers cover Binance Spot, Binance US Spot, Binance
+Perpetual Futures, Bitfinex Spot, Coinbase Spot, Bybit USDT Perpetual, Bybit USDC Perpetual,
+Bybit Spot, Gate USDT Perpetual, and Kraken Pro Futures. `Binance` and `Binance USDT Perpetual`
+remain aliases for older Terry projects.
 
 ## 10. Metrics (44 in results.metrics)
 total, total_winning_trades, total_losing_trades, starting_balance, finishing_balance, win_rate,
@@ -175,9 +183,9 @@ dict: id, strategy_name, symbol, exchange, type, entry_price, exit_price, qty, s
 PNL_percentage, fee, holding_period (s), opened_at, closed_at, orders.
 
 ## 11. Data
-Binance public REST (spot /api/v3/klines, futures /fapi/v1/klines), no key, 1000/req,
-self-throttled. Terry stores 1m candles, aggregates larger timeframes on the fly, dedups re-imports.
-HTTP 451 -> use "Binance US Spot" or a VPN.
+Keyless public REST APIs from Binance, Bitfinex, Coinbase, Bybit, Gate.io, and Kraken. Terry stores
+1m candles, aggregates larger timeframes on the fly, rate-limits pagination, and deduplicates
+re-imports in SQLite. Exchange availability and historical depth remain subject to each provider.
 
 ## 12. Troubleshooting
 - Backtest stopped missing_candles -> import (start ~2 months early), re-run.
@@ -187,15 +195,16 @@ HTTP 451 -> use "Binance US Spot" or a VPN.
 - Agent can't see tools -> ensure run.sh/terry serve is running at http://localhost:9021/mcp.
 
 ## 13. Fidelity vs Jesse
-Validated back-to-back: 174 indicators numerically identical (171/171 within 1e-6); identical
-long+short strategy over identical candles -> 19/19 trades match (entry/exit prices, timestamps,
-counts, streaks, holding periods). Same 44 metric keys/definitions and the same 58 MCP tool names.
-Terry also provides a responsive local browser dashboard on port 9020 with strategy editing,
-candle imports, session history, backtest/optimization/Monte-Carlo/Rule-Test execution, reports,
-JSON/CSV exports, indicators, and saved settings. Minor known gap: cumulative money values may
-differ a fraction of a percent (Terry's default size_to_qty uses a slightly simpler fee term than
-Jesse's 1 - fee_rate*3 + floor); trade entries/exits are unaffected. Not built (by design):
-live/paper trading and Ray parallelism.
+The audit baseline is Jesse 2.5.0 commit `fa63531cae6c09b978711dc1892285067304e2df`
+(2026-07-13). Terry matches its 174 public indicator modules, 44 metric keys, all public Strategy
+method/property names, 58 MCP tool names (with Terry product naming for status), and 12 resource
+topics. `size_to_qty` now uses Jesse's three-fee reserve and precision floor. Research includes ML,
+candle pipelines, benchmark and export formats, chart packs, multi-route/data-route backtests, and
+Optuna train/test optimization. See [JESSE_PARITY.md](JESSE_PARITY.md) for evidence and differences.
+
+This is research compatibility, not total product parity: Terry deliberately uses SQLite and a
+local FastAPI/JavaScript dashboard, runs optimization in one process, and does not contain Jesse's
+separate live/paper exchange-execution plugin, account management, or live notifications.
 
 Dashboard API requests are same-origin, use strict validation and security headers, and can be
 protected by an HttpOnly same-site session cookie via `TERRY_DASHBOARD_PASSWORD`.
@@ -210,6 +219,9 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
-- 0.1.0 — 58 tools, 11 resources, 174 indicators (full Jesse parity), long+short + spot/futures
+- 0.2.0 — Jesse 2.5 audit; strategy/model/util compatibility fixes; candle pipelines and ML;
+  charts, benchmark, CSV/JSON/Pine exports; Optuna OOS optimization; multi-route MCP drafts;
+  10 historical exchange drivers; 12th optimization resource; parity regression suite.
+- 0.1.0 — 58 tools, 11 resources, 174 indicators, long+short + spot/futures
   backtesting, significance/Monte-Carlo/optimization, SQLite, Binance free data, run.sh launcher.
   Engine validated 19/19 trades vs Jesse (same-candle flips + end-of-backtest force-close added).

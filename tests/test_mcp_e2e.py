@@ -151,9 +151,14 @@ async def run():
             assert s["status"] == "finished"
 
             # ---- backtest
-            d = await call(session, "create_backtest_draft", strategy="E2ECross",
-                           symbol=SYMBOL, timeframe="1h", exchange=EXCHANGE,
-                           start_date="2024-01-05", finish_date="2024-02-09")
+            route_json = json.dumps([{
+                "exchange": EXCHANGE, "strategy": "E2ECross",
+                "symbol": SYMBOL, "timeframe": "1h",
+            }])
+            d = await call(session, "create_backtest_draft", routes=route_json,
+                           exchange=EXCHANGE, start_date="2024-01-05", finish_date="2024-02-09",
+                           export_csv=True, export_json=True, export_chart=True,
+                           export_tradingview=True, benchmark=True)
             sid = d["session_id"]
             await call(session, "run_backtest", session_id=sid)
             s = await poll(session, "get_backtest_session", sid)
@@ -162,6 +167,10 @@ async def run():
             print(f"[backtest] trades={m.get('total')} netpct={m.get('net_profit_percentage'):.2f} "
                   f"sharpe={m.get('sharpe_ratio')} report={s.get('dashboard_url','')[:60]}")
             assert s.get("dashboard_url", "").startswith("file://")
+            assert s["results"]["csv"] and s["results"]["json"]
+            assert s["results"]["tradingview"].startswith("//@version=5")
+            assert "return_percentage" in s["results"]["benchmark"]
+            assert os.path.isdir(s["results"]["charts_folder"])
 
             # ---- monte carlo (small)
             d = await call(session, "create_monte_carlo_draft", strategy="E2ECross",
@@ -173,24 +182,35 @@ async def run():
             assert s["status"] == "finished", s
             verdict = s["results"]["candles"]["overfit_verdict"]
             print(f"[monte_carlo] scenarios={s['results']['candles']['num_scenarios']} overfit={verdict}")
+            curves = await call(session, "get_monte_carlo_equity_curves", session_id=sid)
+            assert curves["status"] == "success" and curves["candles"]["scenarios"]
+            assert curves["candles"]["original"]["equity_curve"][0]["name"] == "Portfolio"
 
             # ---- optimization (small)
-            d = await call(session, "create_optimization_draft", strategy="E2ECross",
-                           symbol=SYMBOL, timeframe="1h", exchange=EXCHANGE,
-                           start_date="2024-01-05", finish_date="2024-02-09",
-                           objective="sharpe_ratio", n_trials=15)
+            d = await call(session, "create_optimization_draft", routes=route_json,
+                           exchange=EXCHANGE,
+                           training_start_date="2024-01-05",
+                           training_finish_date="2024-01-25",
+                           testing_start_date="2024-01-25",
+                           testing_finish_date="2024-02-09",
+                           objective_function="sharpe", trials=3,
+                           best_candidates_count=3, warm_up_candles=20)
             sid = d["session_id"]
             await call(session, "run_optimization", session_id=sid)
             s = await poll(session, "get_optimization_session", sid, timeout=300)
             assert s["status"] == "finished", s
             best = s["results"]["best"]
             print(f"[optimize] best_hp={best['hp']} train={best['train_score']:.3f} test={best['test_score']}")
+            assert s["results"]["total_trials"] == 6
+            assert best["training_metrics"] and best["testing_metrics"]
 
             # ---- resource read
             res = await session.read_resource("terry://strategy")
             txt = res.contents[0].text
             assert "Strategy" in txt
             print(f"[resource] terry://strategy read ({len(txt)} chars)")
+            opt_res = await session.read_resource("terry://optimization")
+            assert "out-of-sample" in opt_res.contents[0].text
 
             print("\n✅ E2E MCP workflow passed end-to-end.")
 

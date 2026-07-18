@@ -115,9 +115,10 @@ CANDLE = """# Candle data
 import_candles(exchange, symbol, start_date, finish_date?) returns immediately with an import_id.
 Then poll get_candle_import_status(import_id) every few seconds until status=="finished".
 Already-stored candles are skipped, so re-running from the same start_date is safe. Free source:
-Binance public API (no key). Exchanges: 'Binance Perpetual Futures', 'Binance Spot', 'Binance US
-Spot'. Don't pre-check candles before a backtest — run it; if it stops with missing_candles,
-import starting ~2 months before start_date, then re-run.
+public exchange APIs (no key). Historical drivers cover Binance Spot/US/Perpetual, Bitfinex Spot,
+Coinbase Spot, Bybit Spot/USDT/USDC Perpetual, Gate USDT Perpetual, and Kraken Pro Futures. Don't
+pre-check candles before a backtest — run it; if it stops with missing_candles, import starting
+~2 months before start_date, then re-run.
 """
 
 CONFIGURATION = """# Configuration
@@ -141,9 +142,24 @@ Always size from available_margin/price/fee_rate; branch on is_long/is_short whe
 UTILITIES = """# Utilities (from terry import utils)
 
 size_to_qty, qty_to_size, risk_to_qty, risk_to_size, estimate_risk, limit_stop_loss,
-kelly_criterion, crossed(a,b,direction), numpy_candles_to_dataframe, anchor_timeframe.
+kelly_criterion, crossed(a,b,direction,sequential=False), signal_line, streaks,
+strictly_increasing, strictly_decreasing, sum_floats, subtract_floats,
+numpy_candles_to_dataframe, anchor_timeframe.
 Pairs/stat-arb: prices_to_returns, z_score, are_cointegrated, calculate_alpha_beta,
 combinations_without_repeat.
+"""
+
+OPTIMIZATION = """# Hyperparameter optimization
+
+Define `hyperparameters()` on the strategy, then create an optimization draft and poll the
+session after starting it. Jesse-compatible drafts accept JSON `routes` / `data_routes`, separate
+training and testing date windows, `trials` per hyperparameter, and an `objective_function` of
+sharpe, calmar, sortino, omega, serenity, smart sharpe, or smart sortino. The research API also
+accepts explicit training/testing candle dictionaries and returns `best_trials` with both
+in-sample `training_metrics` and out-of-sample `testing_metrics`.
+
+Prefer candidates that remain strong on the testing window. A large train/test performance gap
+is an overfitting warning; optimization cannot prove future profitability.
 """
 
 BACKTEST_MANAGEMENT = """# Backtest workflow & pitfalls
@@ -211,6 +227,7 @@ _RESOURCES = {
     "terry://configuration": ("Configuration reference", CONFIGURATION),
     "terry://position_risk": ("Position sizing and risk", POSITION_RISK),
     "terry://utilities": ("Utility functions", UTILITIES),
+    "terry://optimization": ("Optimization workflow and result interpretation", OPTIMIZATION),
 }
 
 

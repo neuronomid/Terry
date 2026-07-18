@@ -35,7 +35,12 @@ def _make_exchange(config):
 
 
 def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None,
-             generate_equity_curve=False, hyperparameters=None,
+             generate_tradingview=False, generate_hyperparameters=False,
+             generate_equity_curve=False, benchmark=False, generate_csv=False,
+             generate_json=False, generate_logs=False, hyperparameters=None,
+             fast_mode=False, candles_pipeline_class=None,
+             candles_pipeline_kwargs=None, generate_charts=False,
+             charts_output_root=None,
              strategies_dir=None, strategy_classes=None, strategy_sources=None,
              signal_only=False, should_cancel=None):
     """
@@ -104,6 +109,11 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
 
     data_route_objs = [Route(r["exchange"], r["symbol"], r["timeframe"]) for r in data_routes]
 
+    _apply_candle_pipelines(
+        store, route_objs, data_route_objs,
+        candles_pipeline_class, candles_pipeline_kwargs or {},
+    )
+
     sim = Simulator(store, route_objs, data_route_objs, run_silently=True)
     sim.warmup_1m = warmup_1m
     sim.signal_only = signal_only
@@ -111,7 +121,11 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
         r.strategy.simulator = sim
         r.strategy.store_routes = route_objs
 
-    run_out = sim.run(generate_equity_curve=generate_equity_curve, should_cancel=should_cancel)
+    del fast_mode  # Terry's single engine already uses the streamlined execution path.
+    run_out = sim.run(
+        generate_equity_curve=generate_equity_curve or benchmark or generate_charts,
+        should_cancel=should_cancel,
+    )
 
     metrics = trades_metrics(
         store.closed_trades, store.app.daily_balance,
@@ -120,16 +134,71 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
         store.app.total_open_trades, store.app.total_open_pl,
     )
 
+    trades = [t.to_dict() for t in store.closed_trades]
     result = {
         "metrics": metrics,
-        "trades": [t.to_dict() for t in store.closed_trades],
-        "logs": sim.logs,
+        "trades": trades,
+        "logs": sim.logs if generate_logs else None,
+        "ml_data": [point for route in route_objs
+                    for point in route.strategy._ml_data_points],
     }
     if generate_equity_curve:
         result["equity_curve"] = run_out["equity_curve"]
     if signal_only:
         result["signals"] = sim.signal_log
+    if generate_csv:
+        from .exports import trades_csv
+        result["csv"] = trades_csv(trades)
+    if generate_json:
+        from .exports import trades_json
+        result["json"] = trades_json(trades)
+    if generate_tradingview:
+        from .exports import tradingview_pine
+        result["tradingview"] = tradingview_pine(trades)
+    if generate_hyperparameters:
+        result["hyperparameters"] = dict(route_objs[0].strategy.hp) if route_objs else {}
+    if benchmark:
+        raw = store.candles.raw_1m[jh.key(routes[0]["exchange"], routes[0]["symbol"])]
+        trading_raw = raw[warmup_1m:] if warmup_1m < len(raw) else raw[-1:]
+        first_price, last_price = float(trading_raw[0, 2]), float(trading_raw[-1, 2])
+        result["benchmark"] = {
+            "starting_price": first_price, "finishing_price": last_price,
+            "return_percentage": ((last_price / first_price) - 1) * 100 if first_price else 0,
+        }
+    if generate_charts and trades:
+        from .charts import generate_backtest_charts
+        chart_id, chart_folder = generate_backtest_charts(
+            run_out["equity_curve"], trades,
+            output_root=charts_output_root or "storage/backtest-charts")
+        result["charts_session_id"] = chart_id
+        result["charts_folder"] = chart_folder
     return result
+
+
+def _apply_candle_pipelines(store, routes, data_routes, pipeline_class, pipeline_kwargs):
+    """Apply explicit or strategy-provided pipelines once per exchange-symbol pair."""
+    transformed = set()
+    for route in routes:
+        key = jh.key(route.exchange, route.symbol)
+        if key in transformed:
+            continue
+        pipeline = (pipeline_class(**pipeline_kwargs) if pipeline_class is not None
+                    else route.strategy.candles_pipeline())
+        if pipeline is not None:
+            if not hasattr(pipeline, "transform"):
+                raise TypeError("candles_pipeline() must return a BaseCandlesPipeline instance")
+            store.candles.raw_1m[key] = pipeline.transform(store.candles.raw_1m[key])
+            transformed.add(key)
+    if pipeline_class is not None:
+        for route in data_routes:
+            key = jh.key(route.exchange, route.symbol)
+            if key in transformed:
+                continue
+            pipeline = pipeline_class(**pipeline_kwargs)
+            store.candles.raw_1m[key] = pipeline.transform(store.candles.raw_1m[key])
+            transformed.add(key)
+    if transformed:
+        store.candles._agg_cache = {}
 
 
 def _resolve_hp(strategy, overrides):

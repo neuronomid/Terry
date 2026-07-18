@@ -37,7 +37,10 @@ def register_monte_carlo_tools(mcp):
     @mcp.tool()
     def get_monte_carlo_session(session_id: str) -> dict:
         """Get a Monte Carlo session's status and (when finished) summary_metrics + verdict."""
-        return c.get_session(session_id)
+        payload = c.get_session(session_id)
+        if isinstance(payload.get("results"), dict):
+            payload["results"].pop("equity_curves", None)
+        return payload
 
     @mcp.tool()
     def get_monte_carlo_sessions(limit: int = 20) -> dict:
@@ -46,22 +49,31 @@ def register_monte_carlo_tools(mcp):
 
     @mcp.tool()
     def get_monte_carlo_equity_curves(session_id: str) -> dict:
-        """Return per-scenario summary stats for a finished candles Monte Carlo session."""
+        """Return per-scenario Portfolio equity curves for custom analysis or charts."""
         s = get_context().sessions.get(session_id)
         if s is None:
-            return {"error": "not_found"}
-        res = (s.get("results") or {}).get("candles")
-        if not res:
-            return {"error": "no_candles_results", "message": "Run candles Monte Carlo first."}
-        return {"summary_metrics": res.get("summary_metrics"), "num_scenarios": res.get("num_scenarios")}
+            return {"status": "error", "error": "not_found",
+                    "message": f"Session {session_id} not found"}
+        curves = (s.get("results") or {}).get("equity_curves")
+        if not curves:
+            return {"status": "error", "error": "no_equity_curves",
+                    "message": "The session has no Monte Carlo equity curves."}
+        return {"status": "success", "session_id": session_id,
+                "trades": curves.get("trades"), "candles": curves.get("candles"),
+                "message": "Equity curves retrieved successfully"}
 
     @mcp.tool()
     def get_monte_carlo_logs(session_id: str) -> dict:
         """Return diagnostic info for a Monte Carlo session (status + any error)."""
         s = get_context().sessions.get(session_id)
         if s is None:
-            return {"error": "not_found"}
-        return {"status": s["status"], "results": s.get("results")}
+            return {"status": "error", "error": "not_found",
+                    "message": f"Session {session_id} not found"}
+        result = s.get("results") or {}
+        error = result.get("message") or result.get("error") or ""
+        return {"status": "success", "session_id": session_id,
+                "logs": str(error), "session_status": s["status"],
+                "message": "Monte Carlo diagnostics retrieved successfully"}
 
     @mcp.tool()
     def run_monte_carlo(session_id: str) -> dict:

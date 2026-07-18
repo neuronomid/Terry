@@ -18,13 +18,14 @@ class timeframes:
     DAY_1 = "1D"
     DAY_3 = "3D"
     WEEK_1 = "1W"
+    MONTH_1 = "1M"
 
 
 # Ordered list of supported timeframes (must divide evenly from 1m where possible)
 ALL_TIMEFRAMES = [
     "1m", "3m", "5m", "15m", "30m", "45m",
     "1h", "2h", "3h", "4h", "6h", "8h", "12h",
-    "1D", "3D", "1W",
+    "1D", "3D", "1W", "1M",
 ]
 
 
@@ -49,6 +50,7 @@ class order_statuses:
     EXECUTED = "EXECUTED"   # filled
     CANCELED = "CANCELED"
     QUEUED = "QUEUED"
+    PARTIALLY_FILLED = "PARTIALLY FILLED"
 
 
 class order_roles:

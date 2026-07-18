@@ -1,6 +1,5 @@
 import numpy as np
 
-from .. import helpers as jh
 from ..enums import trade_types
 
 
@@ -58,6 +57,14 @@ class Position:
         return "close"
 
     @property
+    def is_long(self):
+        return self.qty > 0
+
+    @property
+    def is_short(self):
+        return self.qty < 0
+
+    @property
     def value(self):
         if self._current_price is None or self.qty == 0:
             return 0.0
@@ -68,6 +75,40 @@ class Position:
         if self.entry_price is None or self.qty == 0:
             return 0.0
         return abs(self.qty) * self.entry_price
+
+    @property
+    def leverage(self):
+        return self.exchange.leverage
+
+    @property
+    def exchange_type(self):
+        return self.exchange.type
+
+    @property
+    def mode(self):
+        return "spot" if self.exchange.is_spot else self.exchange.futures_leverage_mode
+
+    @property
+    def total_cost(self):
+        if self.is_close:
+            return np.nan
+        return self.entry_value / self.leverage
+
+    @property
+    def entry_margin(self):
+        return self.total_cost
+
+    @property
+    def mark_price(self):
+        return self.current_price
+
+    @property
+    def funding_rate(self):
+        return 0
+
+    @property
+    def next_funding_timestamp(self):
+        return None
 
     @property
     def pnl(self):
@@ -86,8 +127,26 @@ class Position:
         return (self.pnl / margin) * 100
 
     @property
+    def roi(self):
+        return self.pnl_percentage
+
+    @property
     def liquidation_price(self):
-        return np.nan  # not modelled
+        if self.is_close or self.mode in ("cross", "spot"):
+            return np.nan
+        initial_margin_rate = 1 / self.leverage
+        if self.is_long:
+            return self.entry_price * (1 - initial_margin_rate + 0.004)
+        return self.entry_price * (1 + initial_margin_rate - 0.004)
+
+    @property
+    def bankruptcy_price(self):
+        if self.is_close:
+            return np.nan
+        initial_margin_rate = 1 / self.leverage
+        if self.is_long:
+            return self.entry_price * (1 - initial_margin_rate)
+        return self.entry_price * (1 + initial_margin_rate)
 
     # --------------------------------------------------------------- mutation
     def _on_executed_order(self, order):
@@ -166,5 +225,9 @@ class Position:
             "value": self.value,
             "pnl": self.pnl,
             "pnl_percentage": self.pnl_percentage,
+            "leverage": self.leverage,
+            "liquidation_price": self.liquidation_price,
+            "bankruptcy_price": self.bankruptcy_price,
+            "mode": self.mode,
             "is_open": self.is_open,
         }

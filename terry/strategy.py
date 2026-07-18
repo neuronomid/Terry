@@ -6,12 +6,32 @@ update_position/on_open_position/...). Set orders with the smart-order tuples
 `self.buy = qty, price`, `self.sell = qty, price`, `self.stop_loss`, `self.take_profit`.
 """
 from abc import ABC, abstractmethod
+import csv
+from functools import wraps
+import os
+import sys
 
 import numpy as np
 
 from . import helpers as jh
-from .enums import sides, order_roles, exchange_types, trade_types
+from .enums import sides, order_roles, trade_types
 from .exceptions import InvalidStrategy, InvalidShortSellOnSpot
+
+
+def cached(method):
+    """Cache a strategy method for the current candle, matching Jesse's decorator."""
+    @wraps(method)
+    def decorated(self, *args, **kwargs):
+        try:
+            key = (method, args, tuple(sorted(kwargs.items())))
+            hash(key)
+        except TypeError:
+            return method(self, *args, **kwargs)
+        if key not in self._cache:
+            self._cache[key] = method(self, *args, **kwargs)
+        return self._cache[key]
+
+    return decorated
 
 
 def _normalize_orders(value):
@@ -26,6 +46,7 @@ def _normalize_orders(value):
 
 class Strategy(ABC):
     def __init__(self):
+        self.id = jh.generate_unique_id()
         self.name = None
         self.symbol = None
         self.exchange = None
@@ -48,6 +69,103 @@ class Strategy(ABC):
 
         self._cache = {}
         self._chart_lines = []
+        self._current_route_index = None
+
+        # Jesse 2.5 machine-learning gather/deploy state.
+        self.ml_mode = getattr(type(self), "ml_mode", "gather")
+        self._ml_data_points = []
+        self._current_ml_point = None
+        self._ml_model = None
+        self._ml_scaler = None
+        self._ml_feature_importance = None
+
+    def candles_pipeline(self):
+        """Override to transform 1m candles for scenario/Monte Carlo research."""
+        return None
+
+    def record_features(self, features_dict: dict) -> None:
+        if not isinstance(features_dict, dict):
+            raise TypeError("features_dict must be a dict")
+        if self._current_ml_point is None:
+            self._current_ml_point = {
+                "time": int(self.current_candle[0] / 1000),
+                "features": {},
+                "label": None,
+            }
+        self._current_ml_point["features"].update(features_dict)
+
+    def record_label(self, name: str, value) -> None:
+        if self._current_ml_point is None:
+            return
+        self._current_ml_point["label"] = {"name": name, "value": value}
+        self._ml_data_points.append(self._current_ml_point)
+        self._current_ml_point = None
+
+    def export_ml_data(self, directory: str | None = None) -> bool:
+        """Export completed ML samples to ``ml_data/<Strategy>_data.csv``."""
+        try:
+            if directory is None:
+                module = sys.modules.get(self.__class__.__module__)
+                module_file = getattr(module, "__file__", None)
+                directory = os.path.dirname(os.path.abspath(module_file)) if module_file else os.getcwd()
+            ml_dir = os.path.join(directory, "ml_data")
+            os.makedirs(ml_dir, exist_ok=True)
+            data_path = os.path.join(ml_dir, f"{self.name}_data.csv")
+            feature_names = sorted({
+                key for point in self._ml_data_points for key in point["features"]
+            })
+            with open(data_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["time", "label_name", "label_value", *feature_names])
+                for point in self._ml_data_points:
+                    if point.get("label") is None:
+                        continue
+                    writer.writerow([
+                        point["time"], point["label"]["name"], point["label"]["value"],
+                        *(point["features"].get(name, "") for name in feature_names),
+                    ])
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _load_ml_artifacts(self) -> None:
+        if self._ml_model is not None:
+            return
+        module = sys.modules.get(self.__class__.__module__)
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            raise FileNotFoundError(
+                f"Could not determine strategy directory from module '{self.__class__.__module__}'"
+            )
+        from .research.ml import load_ml_model
+
+        artifacts = load_ml_model(os.path.dirname(os.path.abspath(module_file)))
+        self._ml_model = artifacts["model"]
+        self._ml_scaler = artifacts["scaler"]
+        self._ml_feature_importance = artifacts.get("feature_importance")
+
+    def ml_features(self) -> dict:
+        raise NotImplementedError(
+            "Override ml_features() in your strategy and return {feature_name: value}."
+        )
+
+    def _ml_input(self):
+        features = self.ml_features()
+        if not isinstance(features, dict) or not features:
+            raise ValueError("ml_features() must return a non-empty dict")
+        return np.array([[features[key] for key in sorted(features)]], dtype=float)
+
+    def ml_predict(self) -> float:
+        self._load_ml_artifacts()
+        values = self._ml_scaler.transform(self._ml_input())
+        return float(self._ml_model.predict(values)[0])
+
+    def ml_predict_proba(self) -> dict:
+        self._load_ml_artifacts()
+        values = self._ml_scaler.transform(self._ml_input())
+        probabilities = self._ml_model.predict_proba(values)[0]
+        return {_class_label(label): float(probability)
+                for label, probability in zip(self._ml_model.classes_, probabilities)}
 
     # ================================================================= abstract
     @abstractmethod
@@ -209,6 +327,8 @@ class Strategy(ABC):
             if self.should_cancel_entry():
                 self.simulator.cancel_entry_orders(self.symbol)
                 self.on_cancel()
+                for route in self._other_routes():
+                    route.strategy.on_route_canceled(self)
             return
         self._reset_pending()
         want_long = self.should_long()
@@ -352,6 +472,10 @@ class Strategy(ABC):
         return self._exchange.balance
 
     @property
+    def capital(self) -> float:
+        raise NotImplementedError("self.capital was removed; use self.balance instead")
+
+    @property
     def available_margin(self) -> float:
         return self._exchange.available_margin
 
@@ -390,6 +514,56 @@ class Strategy(ABC):
     @property
     def quote_asset(self) -> str:
         return jh.quote_asset(self.symbol)
+
+    @property
+    def routes(self):
+        return list(self.store_routes)
+
+    @property
+    def data_routes(self):
+        return list(self.simulator.data_routes) if self.simulator is not None else []
+
+    @property
+    def current_route_index(self) -> int:
+        if self._current_route_index is None:
+            for index, route in enumerate(self.routes):
+                if (route.exchange, route.symbol, route.timeframe) == (
+                        self.exchange, self.symbol, self.timeframe):
+                    self._current_route_index = index
+                    break
+            else:
+                self._current_route_index = -1
+        return self._current_route_index
+
+    @property
+    def mark_price(self) -> float:
+        return self.position.mark_price
+
+    @property
+    def funding_rate(self) -> float:
+        return self.position.funding_rate
+
+    @property
+    def next_funding_timestamp(self):
+        return self.position.next_funding_timestamp
+
+    @property
+    def liquidation_price(self) -> float:
+        return self.position.liquidation_price
+
+    @property
+    def all_positions(self) -> dict:
+        return {route.symbol: route.strategy.position for route in self.routes}
+
+    @property
+    def daily_balances(self) -> list:
+        return self.store.app.daily_balance
+
+    @property
+    def min_qty(self) -> float:
+        if not self.is_live:
+            raise ValueError("self.min_qty is only available in live modes")
+        return None
 
     # ================================================================= position state
     @property
@@ -461,7 +635,7 @@ class Strategy(ABC):
 
     @property
     def trades(self):
-        return [t for t in self.store.closed_trades if t.symbol == self.symbol]
+        return self.store.closed_trades
 
     @property
     def metrics(self) -> dict:
@@ -478,15 +652,15 @@ class Strategy(ABC):
 
     @property
     def is_livetrading(self) -> bool:
-        return False
+        return self.store.app.trading_mode == "livetrade"
 
     @property
     def is_papertrading(self) -> bool:
-        return False
+        return self.store.app.trading_mode == "papertrade"
 
     @property
     def is_live(self) -> bool:
-        return False
+        return self.is_livetrading or self.is_papertrading
 
     @property
     def shared_vars(self) -> dict:
@@ -495,6 +669,8 @@ class Strategy(ABC):
     # ================================================================= misc
     @staticmethod
     def log(msg, log_type="info", send_notification=False, webhook=None):
+        if log_type not in ("info", "error"):
+            raise ValueError(f'log_type should be either "info" or "error". You passed {log_type}')
         print(f"[{log_type}] {msg}")
 
     def add_line_to_candle_chart(self, title, value, color=None):
@@ -502,14 +678,20 @@ class Strategy(ABC):
 
     def add_horizontal_line_to_candle_chart(self, title, value, color=None,
                                             line_width=1.5, line_style="solid"):
-        self._chart_lines.append(("candle_hline", title, value, color))
+        self._chart_lines.append(("candle_hline", title, value, color, line_width, line_style))
 
     def add_extra_line_chart(self, chart_name, title, value, color=None):
         self._chart_lines.append(("extra_line", chart_name, title, value, color))
 
     def add_horizontal_line_to_extra_chart(self, chart_name, title, value, color=None,
                                            line_width=1.5, line_style="solid"):
-        self._chart_lines.append(("extra_hline", chart_name, title, value, color))
+        self._chart_lines.append(("extra_hline", chart_name, title, value, color,
+                                  line_width, line_style))
 
 
 _SHARED_VARS = {}
+
+
+def _class_label(value):
+    """Preserve numeric/string sklearn class labels while unboxing NumPy scalars."""
+    return value.item() if isinstance(value, np.generic) else value

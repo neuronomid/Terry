@@ -1,6 +1,6 @@
 # How Terry Works — and How to Use It
 
-**Terry** is your own local copy of a crypto trading-strategy lab, built as a **clone of
+**Terry** is your own local crypto trading-strategy lab, built for **research compatibility with
 [Jesse](https://jesse.trade)**. It runs on this Linux machine and talks to AI agents (like Claude
 Code) through **MCP** (Model Context Protocol). You (or an agent) can research an idea, write a
 trading strategy, download real price history, backtest it, and stress-test it — all locally, with
@@ -19,7 +19,8 @@ Think of Terry as three things working together:
 
 1. **A backtesting engine** — it replays historical 1-minute candles and pretends to trade your
    strategy, tracking every order, fill, fee, and the resulting profit/loss.
-2. **A set of research tools** — beyond a plain backtest, it can check whether your entry rule is
+2. **A set of research tools** — beyond a plain backtest, it can gather/train/deploy ML models,
+   apply candle pipelines, benchmark and export results, check whether your entry rule is
    *actually better than random* (significance test), whether a good-looking result was just *luck*
    (Monte Carlo), and it can *tune* your strategy's numbers (optimization).
 3. **An MCP server** — a small local web service that exposes all of the above as "tools" an AI
@@ -52,7 +53,7 @@ You / an AI agent
 ```bash
 cd /home/omid/Documents/Projects/Terry
 
-# 1) create a virtual environment and install the 4 dependencies
+# 1) create a virtual environment and install the dependencies
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
@@ -213,7 +214,7 @@ includes its path as `dashboard_url`. Open it in a browser to see the equity cur
 
 ---
 
-## 8. The tools an agent can call (58 total)
+## 8. The tools an agent can call (58 total, plus 12 reference resources)
 
 - **Status/help:** `get_terry_status`, `greet_user`
 - **Strategies:** `create_strategy`, `read_strategy`, `write_strategy`
@@ -234,6 +235,10 @@ The long-running tools (`run_backtest`, `run_significance_test`, `run_monte_carl
 `run_optimization`) return immediately; the agent then polls the matching `get_*_session` until the
 status is `finished` or `stopped`. **In Terry these are free and unlimited** (Jesse charges credits
 for them; Terry does not).
+
+Terry's open research surface is audited against Jesse 2.5.0. Live and paper exchange execution,
+exchange accounts, and live notifications are not included; the full matrix is in
+[JESSE_PARITY.md](JESSE_PARITY.md).
 
 ---
 
@@ -262,7 +267,8 @@ Terry/
 
 - **"No candle data …" when backtesting** → import candles first (start ~2 months before your
   backtest start date to cover indicator warm-up), then re-run.
-- **HTTP 451 on import** → Binance is geo-blocked from your IP; use exchange `"Binance US Spot"` or a VPN.
+- **HTTP 451 on import** → that exchange is geo-blocked from your IP; choose another supported
+  public driver available in your region.
 - **Agent can't see the tools** → make sure `terry serve` is running and you added the MCP server with
   `--transport http` at `http://localhost:9021/mcp`.
 - **Shorting error on spot** → shorting only works on futures exchanges (e.g. "Binance Perpetual

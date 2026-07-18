@@ -3,7 +3,7 @@
 **Terry** is a local, self-contained MCP server for crypto-strategy research, backtesting, and
 robustness analysis. It lets an AI agent (Claude Code, Cursor, …) build and test trading
 strategies end-to-end on your own machine — no cloud, PostgreSQL, Redis, or paid credits. Data
-comes from Binance's free public API.
+comes from the same keyless public exchange APIs Jesse enables for historical backtesting.
 
 > Terry only **simulates** trades on historical data. It does not connect to exchange accounts or
 > place real orders. Past performance never guarantees future results.
@@ -75,24 +75,32 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
 
 - **Backtesting engine** — candle-by-candle, no look-ahead, spot & futures, smart orders,
   stop-loss/take-profit, and 44 performance metrics.
-- **Strategy API** — source-compatible `Strategy` base class (`should_long`/`go_long`/…).
+- **Strategy API** — Jesse-compatible `Strategy`, order, position, and trade surfaces, including
+  ML gather/deploy helpers and candle pipelines.
 - **Research tools** — Rule Significance Test (bootstrap p-value), Monte Carlo (overfit/robustness),
-  and hyperparameter optimization with out-of-sample validation.
-- **58 MCP tools + 11 resources** — tools for strategy creation, data import, configuration,
+  ML training, backtest exports/charts/benchmarking, and Optuna optimization with out-of-sample
+  validation.
+- **58 MCP tools + 12 resources** — tools for strategy creation, data import, configuration,
   backtesting, and analysis.
-- **Free data + local storage** — Binance public REST + SQLite.
+- **Free data + local storage** — 10 Jesse backtest exchanges through public REST + SQLite.
+
+Terry targets Jesse's open research/backtest product surface. It does not implement Jesse's
+separate live/paper-trading execution plugin or exchange-account management. See the exact,
+versioned comparison in [JESSE_PARITY.md](JESSE_PARITY.md).
 
 ## Docs
 
 - [HOW_TERRY_WORKS.md](HOW_TERRY_WORKS.md) — plain-language guide for you and for agents.
 - [APIS_AND_SERVICES.md](APIS_AND_SERVICES.md) — what services are needed (almost none; all free).
 - [TERRY_BUILD_PLAN.md](TERRY_BUILD_PLAN.md) — design & build plan.
+- [JESSE_PARITY.md](JESSE_PARITY.md) — audited Jesse 2.5 compatibility matrix and limits.
 - [AGENTS.md](AGENTS.md) — the canonical rules agents follow.
 
 ## Tests
 
 ```bash
 .venv/bin/python -m pytest tests/test_engine.py -q   # unit tests (offline)
+.venv/bin/python -m pytest -q                        # full offline suite
 .venv/bin/python tests/test_mcp_e2e.py               # full MCP workflow (needs internet)
 ```
 

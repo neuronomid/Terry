@@ -1,28 +1,67 @@
-"""Optimization tools (draft → run → poll), random search with train/test split."""
+"""Optimization tools (draft → run → poll), with explicit out-of-sample validation."""
 from . import _common as c
 from ...context import get_context
 
 
 def register_optimization_tools(mcp):
     @mcp.tool()
-    def create_optimization_draft(strategy: str, symbol: str = None, timeframe: str = None,
+    def create_optimization_draft(strategy: str = None, symbol: str = None, timeframe: str = None,
                                   exchange: str = None, start_date: str = None,
                                   finish_date: str = None, objective: str = "sharpe_ratio",
-                                  n_trials: int = 100, train_test_split: float = 0.75,
-                                  config: str = None) -> dict:
+                                  n_trials: int = None, train_test_split: float = 0.75,
+                                  config: str = None, routes: str = None,
+                                  data_routes: str = "[]", training_start_date: str = None,
+                                  training_finish_date: str = None,
+                                  testing_start_date: str = None,
+                                  testing_finish_date: str = None,
+                                  optimal_total: int = 50,
+                                  objective_function: str = None, trials: int = 200,
+                                  best_candidates_count: int = 20,
+                                  warm_up_candles: int = None, fast_mode: bool = True,
+                                  cpu_cores: int = None, title: str = None,
+                                  description: str = None, strategy_summary: str = None,
+                                  hypothesis: str = None, rationale: str = None) -> dict:
         """Create an optimization draft. The strategy must define hyperparameters().
 
-        Optimizes on the training window and validates the best candidates out-of-sample on the
-        test window. objective is a metric key (sharpe_ratio, net_profit_percentage, calmar_ratio…).
-        Then call run_optimization(session_id).
+        Jesse-style callers may provide JSON routes and separate training/testing date windows.
+        Terry's shorthand start/finish + n_trials form remains supported.
         """
-        state, err = c.build_base_state(strategy, symbol, timeframe, exchange,
-                                        start_date, finish_date, config)
+        explicit_windows = any((training_start_date, training_finish_date,
+                                testing_start_date, testing_finish_date))
+        if explicit_windows and not all((training_start_date, training_finish_date,
+                                         testing_start_date, testing_finish_date)):
+            return {"error": "invalid_config", "message":
+                    "All four training/testing date fields are required together."}
+        base_start = training_start_date or start_date
+        base_finish = training_finish_date or finish_date
+        state, err = c.build_routes_state(
+            strategy, symbol, timeframe, exchange, base_start, base_finish, config,
+            routes, data_routes)
         if err:
             return {"error": "invalid_config", "message": err}
-        state.update({"objective": objective, "n_trials": int(n_trials),
-                      "train_test_split": float(train_test_split)})
-        return c.create_draft("optimization", state)
+        state.update({
+            "objective_function": objective_function or objective,
+            "train_test_split": float(train_test_split),
+            "optimal_total": int(optimal_total),
+            "best_candidates_count": int(best_candidates_count),
+            "fast_mode": bool(fast_mode), "cpu_cores": cpu_cores,
+        })
+        if n_trials is not None:
+            state["n_trials"] = int(n_trials)
+        else:
+            state["trials"] = int(trials)
+        if explicit_windows:
+            state.update({
+                "training_start_date": training_start_date,
+                "training_finish_date": training_finish_date,
+                "testing_start_date": testing_start_date,
+                "testing_finish_date": testing_finish_date,
+            })
+        if warm_up_candles is not None:
+            state.setdefault("config", {})["warm_up_candles"] = int(warm_up_candles)
+        notes = "\n\n".join(filter(None, [title, description, strategy_summary,
+                                           hypothesis, rationale]))
+        return c.create_draft("optimization", state, notes=notes)
 
     @mcp.tool()
     def update_optimization_draft(session_id: str, state: str) -> dict:

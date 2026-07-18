@@ -24,7 +24,8 @@ and free public Binance data (no API key).
 
 `terry://strategy`, `terry://strategy_examples`, `terry://indicator`, `terry://position_risk`,
 `terry://utilities`, `terry://backtest_management`, `terry://backtest_metrics`, `terry://candle`,
-`terry://configuration`, `terry://significance_test`, `terry://monte_carlo`.
+`terry://configuration`, `terry://significance_test`, `terry://monte_carlo`,
+`terry://optimization`.
 When a strategy-creation or backtest error occurs, consult `terry://backtest_management` first.
 
 ## Writing strategies

@@ -31,7 +31,7 @@ def _cmd_init(args):
     # copy AGENTS.md if present in the package
     print(f"Initialized Terry project at {root}")
     print(f"  strategies/  ({len(os.listdir(strategies))} strategies)")
-    print(f"  storage/     (candles.db, sessions.db, reports/ will be created here)")
+    print("  storage/     (candles.db, sessions.db, reports/ will be created here)")
     print("\nNext: `terry serve` then connect your agent to http://localhost:9021/mcp")
 
 
@@ -39,7 +39,10 @@ def _cmd_doctor(args):
     print(f"Terry {__version__}")
     print(f"Python: {sys.version.split()[0]}")
     ok = True
-    for mod in ("numpy", "pandas", "requests", "mcp", "scipy", "jesse_rust"):
+    for mod in (
+        "numpy", "pandas", "requests", "mcp", "scipy", "jesse_rust", "joblib",
+        "sklearn", "matplotlib", "optuna", "statsmodels", "tqdm", "fastapi", "uvicorn",
+    ):
         try:
             __import__(mod)
             print(f"  ✓ {mod}")
@@ -58,7 +61,6 @@ def _cmd_doctor(args):
 def _cmd_backtest(args):
     """Quick CLI backtest (bypasses MCP) — handy for testing without an agent."""
     from .context import TerryContext, set_context
-    from .sessions.runner import Runner
     ctx = set_context(TerryContext(args.project))
     state = {"strategy": args.strategy, "symbol": args.symbol, "timeframe": args.timeframe,
              "exchange": args.exchange or ctx.config.get()["exchange"],

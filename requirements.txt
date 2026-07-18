@@ -4,5 +4,11 @@ pandas>=2.0
 requests>=2.31
 scipy>=1.11
 jesse-rust==1.2.0
+joblib>=1.5,<2
+scikit-learn>=1.7,<1.9
+matplotlib>=3.10,<4
+optuna>=4.2,<5
+statsmodels>=0.14,<1
+tqdm>=4.66,<5
 fastapi>=0.115,<1
 uvicorn>=0.30,<1

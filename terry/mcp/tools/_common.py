@@ -37,13 +37,66 @@ def build_base_state(strategy, symbol, timeframe, exchange, start_date, finish_d
     return state, None
 
 
+def parse_json_list(value, field):
+    """Parse an MCP JSON-array argument while also accepting an already-decoded list."""
+    if value is None:
+        return [], None
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError as e:
+        return None, f"❌ Invalid {field} JSON: {e}"
+    if not isinstance(parsed, list):
+        return None, f"❌ {field} must be a JSON array."
+    return parsed, None
+
+
+def build_routes_state(strategy, symbol, timeframe, exchange, start_date, finish_date,
+                       config_json, routes_json=None, data_routes_json=None):
+    """Build a state from either Terry's shorthand route or Jesse-style route arrays."""
+    routes, err = parse_json_list(routes_json, "routes")
+    if err:
+        return None, err
+    data_routes, err = parse_json_list(data_routes_json, "data_routes")
+    if err:
+        return None, err
+    if routes:
+        required = {"strategy", "symbol", "timeframe"}
+        for index, route in enumerate(routes):
+            if not isinstance(route, dict) or not required.issubset(route):
+                return None, (f"❌ routes[{index}] must contain strategy, symbol, and "
+                              "timeframe.")
+        first = routes[0]
+        strategy = first["strategy"]
+        symbol = first["symbol"]
+        timeframe = first["timeframe"]
+        exchange = exchange or first.get("exchange")
+    if not strategy:
+        return None, "❌ strategy is required when routes is empty."
+    state, err = build_base_state(strategy, symbol, timeframe, exchange,
+                                  start_date, finish_date, config_json)
+    if err:
+        return None, err
+    if routes:
+        for route in routes:
+            route.setdefault("exchange", state["exchange"])
+        state["routes"] = routes
+    if data_routes:
+        for route in data_routes:
+            route.setdefault("exchange", state["exchange"])
+        state["data_routes"] = data_routes
+    return state, None
+
+
 def create_draft(kind, state, notes=""):
     ctx = get_context()
-    # validate strategy exists on disk
+    # validate every trading strategy exists on disk
     from ...loader import strategy_exists
-    if not strategy_exists(ctx.strategies_dir, state["strategy"]):
-        return {"error": "strategy_not_found",
-                "message": f'Strategy "{state["strategy"]}" not found. Create it first with create_strategy().'}
+    strategy_names = {route["strategy"] for route in state.get("routes", [])}
+    strategy_names.add(state["strategy"])
+    for strategy_name in strategy_names:
+        if not strategy_exists(ctx.strategies_dir, strategy_name):
+            return {"error": "strategy_not_found",
+                    "message": f'Strategy "{strategy_name}" not found. Create it first with create_strategy().'}
     sid = ctx.sessions.create(kind, state, notes=notes)
     return {"status": "draft", "session_id": sid, "state": state}
 
