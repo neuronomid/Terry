@@ -49,5 +49,10 @@ td,.metric-card strong,.progress-card small { font-variant-numeric:tabular-nums;
 .light .form-grid label,.light .notes-label,.light .strategy-item,.light .indicator-list button,.light .feature-list,.light .result summary,.light td code { color:#4d5666; }
 .light .indicator-doc pre,.light .callout { color:#4d5666; }
 .light .login-card form { color:#f3f4f6; }
+.session-metadata { display:grid; gap:12px; margin:14px 0; }
+.notes-label input,.notes-label textarea { width:100%; padding:10px 11px; border:1px solid #323743; border-radius:6px; outline:none; background:#13151a; color:var(--text); }
+.light .notes-label input,.light .notes-label textarea { background:#fafbfd; color:#1f2430; }
+.history input:focus-visible,.login-card input:focus-visible,.code-editor:focus-visible,.notes-label input:focus-visible,.notes-label textarea:focus-visible { outline:2px solid var(--gold); outline-offset:2px; border-color:var(--gold); }
 @media (max-width:760px) { .sidebar { padding-top:max(26px,env(safe-area-inset-top)); padding-bottom:max(16px,env(safe-area-inset-bottom)); overscroll-behavior:contain; }.menu-open .nav-backdrop { display:block; }.topbar { padding-top:max(18px,env(safe-area-inset-top)); } }
+@media (pointer:coarse) { button,.nav-item,a.primary,a.secondary,input,select,summary { min-height:44px; }.icon-button,.avatar { min-width:44px; min-height:44px; } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }

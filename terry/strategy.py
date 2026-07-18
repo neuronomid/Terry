@@ -14,8 +14,8 @@ import sys
 import numpy as np
 
 from . import helpers as jh
-from .enums import sides, order_roles, trade_types
-from .exceptions import InvalidStrategy, InvalidShortSellOnSpot
+from .enums import sides, order_roles, order_submitted_via, trade_types
+from .exceptions import ConflictingRules, InvalidStrategy, InvalidShortSellOnSpot
 
 
 def cached(method):
@@ -39,8 +39,12 @@ def _normalize_orders(value):
     if value is None:
         return None
     arr = np.array(value, dtype=float)
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=float)
     if arr.ndim == 1:
         arr = arr.reshape(1, 2)
+    if np.any(arr[:, 1] <= 0):
+        raise InvalidStrategy("Order price must be greater than zero.")
     return arr
 
 
@@ -52,8 +56,13 @@ class Strategy(ABC):
         self.exchange = None
         self.timeframe = None
         self.index = 0
+        self.last_trade_index = 0
         self.vars = {}
         self.hp = {}
+        self.increased_count = 0
+        self.reduced_count = 0
+        self.trades_count = 0
+        self.trade = None
 
         # engine wiring (set right after instantiation)
         self.position = None          # Position
@@ -70,6 +79,7 @@ class Strategy(ABC):
         self._cache = {}
         self._chart_lines = []
         self._current_route_index = None
+        self._evaluating_filters = False
 
         # Jesse 2.5 machine-learning gather/deploy state.
         self.ml_mode = getattr(type(self), "ml_mode", "gather")
@@ -252,6 +262,7 @@ class Strategy(ABC):
     @buy.setter
     def buy(self, value):
         self._buy = _normalize_orders(value)
+        self._replace_entry_orders(sides.BUY, self._buy)
 
     @property
     def sell(self):
@@ -260,6 +271,7 @@ class Strategy(ABC):
     @sell.setter
     def sell(self, value):
         self._sell = _normalize_orders(value)
+        self._replace_entry_orders(sides.SELL, self._sell)
 
     @property
     def stop_loss(self):
@@ -273,7 +285,7 @@ class Strategy(ABC):
             )
         self._stop_loss = _normalize_orders(value)
         if self.is_open:
-            self._sync_exit_orders()
+            self._sync_exit_orders(order_submitted_via.STOP_LOSS)
 
     @property
     def take_profit(self):
@@ -287,7 +299,7 @@ class Strategy(ABC):
             )
         self._take_profit = _normalize_orders(value)
         if self.is_open:
-            self._sync_exit_orders()
+            self._sync_exit_orders(order_submitted_via.TAKE_PROFIT)
 
     _in_go_entry = False
 
@@ -295,6 +307,9 @@ class Strategy(ABC):
         """Close the open position immediately at market."""
         if not self.is_open:
             return
+        for order in self._active_orders():
+            if order.role == order_roles.CLOSE_POSITION:
+                self.simulator.cancel_order(order)
         qty = abs(self.position.qty)
         side = sides.SELL if self.position.qty > 0 else sides.BUY
         price = self.price
@@ -303,14 +318,11 @@ class Strategy(ABC):
 
     # ================================================================= engine driver
     def _execute(self):
-        self.index += 1
         self._cache = {}
         self.before()
 
         if self.position.is_open:
             self.update_position()
-            if self.position.is_open:
-                self._sync_exit_orders()
 
         # If there is no open position (either there wasn't one, or update_position() just
         # closed it via liquidate), evaluate entries on the SAME candle — this matches Jesse's
@@ -319,6 +331,9 @@ class Strategy(ABC):
             self._evaluate_entries()
 
         self.after()
+        # Jesse exposes index 0 during the first strategy execution and advances
+        # it only after before/check/after have completed.
+        self.index += 1
 
     def _evaluate_entries(self):
         active_entries = [o for o in self._active_orders()
@@ -332,56 +347,121 @@ class Strategy(ABC):
             return
         self._reset_pending()
         want_long = self.should_long()
-        want_short = False
-        if not want_long:
-            want_short = self.should_short()
+        want_short = self.should_short()
+        if want_long and want_short:
+            raise ConflictingRules(
+                "should_short and should_long cannot both return True.")
         if want_short and self.is_spot_trading:
             raise InvalidShortSellOnSpot("Shorting is not supported on spot.")
         if want_long or want_short:
+            self._in_go_entry = True
+            try:
+                if want_long:
+                    self.go_long()
+                else:
+                    self.go_short()
+            finally:
+                self._in_go_entry = False
             if self._filters_pass():
-                self._in_go_entry = True
-                try:
-                    if want_long:
-                        self.go_long()
-                        self._submit_entry(sides.BUY)
-                    elif want_short:
-                        self.go_short()
-                        self._submit_entry(sides.SELL)
-                finally:
-                    self._in_go_entry = False
-                # futures may have set stop/take in go_* — synced on open
+                self._submit_entry(sides.BUY if want_long else sides.SELL)
+            else:
+                # Rejected smart-order specs are not visible on later candles.
+                self._reset_pending()
+            # futures may have set stop/take in go_* — synced on open
 
     def _filters_pass(self):
-        for f in self.filters():
-            if not f():
-                return False
-        return True
+        self._evaluating_filters = True
+        try:
+            for f in self.filters():
+                try:
+                    passed = f()
+                except TypeError as exc:
+                    raise InvalidStrategy(
+                        "Invalid filter format. You need to pass filter methods "
+                        "WITHOUT calling them (no parentheses must be present at "
+                        "the end)."
+                    ) from exc
+                if not passed:
+                    return False
+            return True
+        finally:
+            self._evaluating_filters = False
 
     def _submit_entry(self, side):
         spec = self._buy if side == sides.BUY else self._sell
         if spec is None:
             return
-        for qty, price in spec:
-            self.simulator.submit_order(self, side, qty, price,
-                                        role=order_roles.OPEN_POSITION)
+        self._submit_entry_specs(side, spec)
 
-    def _sync_exit_orders(self):
+    def _submit_entry_specs(self, side, spec):
+        submitted = []
+        for qty, price in spec:
+            submitted.append(self.simulator.submit_order(
+                self, side, qty, price, role=order_roles.OPEN_POSITION,
+                defer_execution=True))
+        # Jesse reserves/submits the complete batch before executing market
+        # orders, so callbacks can inspect all pending orders and reservations.
+        for order in submitted:
+            self.simulator.execute_market_order(order)
+
+    def _replace_entry_orders(self, side, spec):
+        if (self.position is None or self.simulator is None or
+                not self.position.is_open or self._in_go_entry):
+            return
+        for order in self._active_orders():
+            if order.role == order_roles.OPEN_POSITION:
+                self.simulator.cancel_order(order)
+        if spec is not None and len(spec):
+            self._submit_entry_specs(side, spec)
+
+    def _sync_exit_orders(self, changed=None):
         """Ensure active exit orders match the current stop_loss/take_profit specs."""
         if not self.is_open:
             return
+        self._validate_exit_specs()
         exit_side = sides.SELL if self.position.qty > 0 else sides.BUY
-        # cancel existing exit orders, resubmit from specs (handles trailing reassignment)
+        # A stop reassignment replaces stops only; a take-profit reassignment
+        # replaces takes only. This matters for tiered exits where one side is
+        # updated after a partial fill. ``changed=None`` performs the initial
+        # full synchronization when a position opens.
+        tags = ((order_submitted_via.STOP_LOSS,)
+                if changed == order_submitted_via.STOP_LOSS else
+                (order_submitted_via.TAKE_PROFIT,)
+                if changed == order_submitted_via.TAKE_PROFIT else
+                (order_submitted_via.STOP_LOSS,
+                 order_submitted_via.TAKE_PROFIT))
         for o in self._active_orders():
-            if o.role == order_roles.CLOSE_POSITION:
-                o.cancel()
-        for spec, tag in ((self._stop_loss, "stop_loss"), (self._take_profit, "take_profit")):
-            if spec is None:
+            if (o.role == order_roles.CLOSE_POSITION and
+                    o.submitted_via in tags):
+                self.simulator.cancel_order(o)
+        for spec, tag in (
+                (self._stop_loss, order_submitted_via.STOP_LOSS),
+                (self._take_profit, order_submitted_via.TAKE_PROFIT)):
+            if tag not in tags or spec is None:
                 continue
             for qty, price in spec:
+                submit_price = price
+                if tag == order_submitted_via.STOP_LOSS and (
+                        (self.is_long and price >= self.price) or
+                        (self.is_short and price <= self.price)):
+                    submit_price = self.price
+                elif tag == order_submitted_via.TAKE_PROFIT and (
+                        (self.is_long and price <= self.price) or
+                        (self.is_short and price >= self.price)):
+                    submit_price = self.price
                 order = self.simulator.submit_order(
-                    self, exit_side, abs(qty), price,
-                    role=order_roles.CLOSE_POSITION, reduce_only=True)
-                order.submitted_via = tag
+                    self, exit_side, abs(qty), submit_price,
+                    role=order_roles.CLOSE_POSITION, reduce_only=True,
+                    submitted_via=tag)
+
+    def _validate_exit_specs(self):
+        if (self._stop_loss is not None and self._take_profit is not None and
+                len(self._stop_loss) and
+                np.array_equal(self._stop_loss, self._take_profit)):
+            raise InvalidStrategy(
+                "stop-loss and take-profit should not be exactly the same. "
+                "Just use either one of them and it will do."
+            )
 
     def _reset_pending(self):
         self._buy = None
@@ -391,23 +471,35 @@ class Strategy(ABC):
 
     # engine event bridges (called by simulator)
     def _on_open_position(self, order):
-        self.on_open_position(order)
+        self.increased_count = 1
+        self.trade = self.simulator._open_trade.get(self.symbol)
+        # Futures strategies may define protective orders in go_long/go_short.
+        # Jesse submits those orders before invoking on_open_position(), so the
+        # hook can inspect or replace them. Spot strategies define protection in
+        # on_open_position(); the property setters synchronize those immediately.
         self._sync_exit_orders()
+        self.on_open_position(order)
         for r in self._other_routes():
             r.strategy.on_route_open_position(self)
 
     def _on_close_position(self, order, closed_trade):
+        self.last_trade_index = self.index
+        self.trades_count += 1
+        self.increased_count = 0
+        self.reduced_count = 0
         self._reset_pending()
         self.on_close_position(order, closed_trade)
         for r in self._other_routes():
             r.strategy.on_route_close_position(self)
 
     def _on_increased_position(self, order):
+        self.increased_count += 1
         self.on_increased_position(order)
         for r in self._other_routes():
             r.strategy.on_route_increased_position(self)
 
     def _on_reduced_position(self, order):
+        self.reduced_count += 1
         self.on_reduced_position(order)
         for r in self._other_routes():
             r.strategy.on_route_reduced_position(self)
@@ -584,13 +676,11 @@ class Strategy(ABC):
 
     @property
     def average_entry_price(self):
-        if self.is_open:
-            return self.position.entry_price
         spec = self._buy if self._buy is not None else self._sell
         if spec is None:
-            return None
-        qty = spec[:, 0].sum()
-        return float((spec[:, 0] * spec[:, 1]).sum() / qty) if qty else None
+            return self.position.entry_price if self.is_open else None
+        qty = np.abs(spec[:, 0]).sum()
+        return float(np.abs(spec[:, 0] * spec[:, 1]).sum() / qty) if qty else None
 
     @property
     def average_stop_loss(self) -> float:
@@ -608,13 +698,21 @@ class Strategy(ABC):
 
     @property
     def has_long_entry_orders(self) -> bool:
-        return any(o.is_buy and o.role == order_roles.OPEN_POSITION
-                   for o in self._active_orders())
+        orders = [o for o in self._active_orders()
+                  if o.role == order_roles.OPEN_POSITION]
+        if not orders:
+            return ((self._in_go_entry or self._evaluating_filters) and
+                    self._buy is not None and len(self._buy) > 0)
+        return orders[0].is_buy
 
     @property
     def has_short_entry_orders(self) -> bool:
-        return any(o.is_sell and o.role == order_roles.OPEN_POSITION
-                   for o in self._active_orders())
+        orders = [o for o in self._active_orders()
+                  if o.role == order_roles.OPEN_POSITION]
+        if not orders:
+            return ((self._in_go_entry or self._evaluating_filters) and
+                    self._sell is not None and len(self._sell) > 0)
+        return orders[0].is_sell
 
     # ================================================================= orders/trades
     @property
@@ -623,11 +721,13 @@ class Strategy(ABC):
 
     @property
     def entry_orders(self):
-        return [o for o in self.orders if o.role == order_roles.OPEN_POSITION]
+        return [o for o in self.orders
+                if o.role == order_roles.OPEN_POSITION and not o.is_canceled]
 
     @property
     def exit_orders(self):
-        return [o for o in self.orders if o.role == order_roles.CLOSE_POSITION]
+        return [o for o in self.orders
+                if o.role == order_roles.CLOSE_POSITION and not o.is_canceled]
 
     @property
     def active_exit_orders(self):
@@ -664,29 +764,56 @@ class Strategy(ABC):
 
     @property
     def shared_vars(self) -> dict:
-        return self.store.vars
+        if self.store is not None:
+            return self.store.vars
+        from .store import get_current_store
+        return get_current_store().vars
 
     # ================================================================= misc
     @staticmethod
     def log(msg, log_type="info", send_notification=False, webhook=None):
-        if log_type not in ("info", "error"):
-            raise ValueError(f'log_type should be either "info" or "error". You passed {log_type}')
-        print(f"[{log_type}] {msg}")
+        from .services import logger
+        msg = str(msg)
+        if log_type == "info":
+            logger.info(msg, send_notification=send_notification, webhook=webhook)
+        elif log_type == "error":
+            logger.error(msg, send_notification=send_notification)
+        else:
+            raise ValueError(
+                f'log_type should be either "info" or "error". You passed {log_type}')
 
     def add_line_to_candle_chart(self, title, value, color=None):
+        self._validate_chart_value(value)
         self._chart_lines.append(("candle_line", title, value, color))
 
     def add_horizontal_line_to_candle_chart(self, title, value, color=None,
                                             line_width=1.5, line_style="solid"):
+        self._validate_chart_value(value)
+        self._validate_line_style(line_style)
         self._chart_lines.append(("candle_hline", title, value, color, line_width, line_style))
 
     def add_extra_line_chart(self, chart_name, title, value, color=None):
+        self._validate_chart_value(value)
         self._chart_lines.append(("extra_line", chart_name, title, value, color))
 
     def add_horizontal_line_to_extra_chart(self, chart_name, title, value, color=None,
                                            line_width=1.5, line_style="solid"):
+        self._validate_chart_value(value)
+        self._validate_line_style(line_style)
         self._chart_lines.append(("extra_hline", chart_name, title, value, color,
                                   line_width, line_style))
+
+    @staticmethod
+    def _validate_chart_value(value):
+        if not isinstance(value, (int, float)):
+            raise ValueError(
+                f"Invalid value type: {type(value)}. The value must be either "
+                f"int or float; you're passing {value}")
+
+    @staticmethod
+    def _validate_line_style(line_style):
+        if line_style not in ("solid", "dotted"):
+            raise ValueError(f"Invalid line_style: {line_style}")
 
 def _class_label(value):
     """Preserve numeric/string sklearn class labels while unboxing NumPy scalars."""

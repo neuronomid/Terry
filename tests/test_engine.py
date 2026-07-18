@@ -206,7 +206,7 @@ def test_stop_loss_take_profit_fill():
     """A position with a tight TP should close in profit; verify exits fire."""
     class TPStrat(Strategy):
         def should_long(self):
-            return self.index == 1
+            return self.index == 0
         def should_short(self):
             return False
         def go_long(self):

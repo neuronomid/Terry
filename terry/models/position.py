@@ -1,6 +1,7 @@
 import numpy as np
 
 from ..enums import trade_types
+from ..utils import sum_floats
 
 
 class Position:
@@ -29,6 +30,8 @@ class Position:
         self.increased_count = 0
         self.reduced_count = 0
         self.strategy = None
+        if self.exchange.is_spot:
+            self.exchange.ensure_base_asset(symbol)
 
     # ------------------------------------------------------------------ price
     @property
@@ -156,17 +159,23 @@ class Position:
         fee = abs(qty_change) * price * self.exchange.fee_rate
 
         prev_qty = self.qty
-        new_qty = prev_qty + qty_change
-
-        # charge the fee immediately (both spot & futures)
-        self.exchange.charge_fee(fee)
 
         if self.exchange.is_spot:
-            # spot cash accounting
-            if qty_change > 0:      # buy → spend quote
-                self.exchange.spend_quote(abs(qty_change) * price)
-            else:                   # sell → receive quote
-                self.exchange.receive_quote(abs(qty_change) * price)
+            if qty_change > 0:
+                # Jesse deducts buy fees from received base quantity. Quote was
+                # already reserved when the order was submitted.
+                qty_change *= 1 - self.exchange.fee_rate
+                self.exchange.add_base(self.symbol, qty_change)
+                order.reserved_quote = 0.0
+            else:
+                # Sell fees are deducted from settlement proceeds.
+                self.exchange.receive_quote(
+                    abs(qty_change) * price * (1 - self.exchange.fee_rate))
+                self.exchange.add_base(self.symbol, qty_change)
+        else:
+            self.exchange.charge_fee(fee)
+
+        new_qty = sum_floats(prev_qty, qty_change)
 
         opened = prev_qty == 0 and new_qty != 0
         increased = prev_qty != 0 and (np.sign(new_qty) == np.sign(prev_qty)) and abs(new_qty) > abs(prev_qty)

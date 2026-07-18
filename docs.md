@@ -4,7 +4,7 @@ Single source of truth for connecting to and operating **Terry** over MCP. Terry
 self-contained Jesse-compatible crypto research framework: build, backtest, and stress-test
 strategies locally. Free public exchange data, SQLite storage, no cloud/keys.
 
-- **Version 0.2.2** · **174 indicator modules** · **58 MCP tools** · **12 resources**
+- **Version 0.2.3** · **174 indicator modules** · **58 MCP tools** · **12 resources**
 - **Transport:** streamable-HTTP · **URL:** `http://localhost:9021/mcp`
 - Long **and** short, spot **and** futures. Simulation only — never places real orders.
 
@@ -212,8 +212,9 @@ re-imports in SQLite. Exchange availability and historical depth remain subject 
 ## 13. Fidelity vs Jesse
 The audit baseline is Jesse 2.5.0 commit `fa63531cae6c09b978711dc1892285067304e2df`
 (2026-07-13). Terry matches its 174 public indicator modules, 44 metric keys, all public Strategy
-method/property names, 58 MCP tool names (with Terry product naming for status), and 12 resource
-topics. `size_to_qty` now uses Jesse's three-fee reserve and precision floor. Research includes ML,
+method/property names, all 120 public helper and 23 utility function names/signature shapes, 58 MCP
+tool names (with Terry product naming for status), and 12 resource topics. `size_to_qty` now uses
+Jesse's three-fee reserve and precision floor. Research includes ML,
 candle pipelines, benchmark and export formats, chart packs, multi-route/data-route backtests, and
 Optuna train/test optimization. Research workers honor cpu_cores locally; the dashboard exposes
 route/data-route JSON, Monte Carlo pipelines, optimization controls, and an IDE-like editor. See
@@ -222,6 +223,8 @@ route/data-route JSON, Monte Carlo pipelines, optimization controls, and an IDE-
 Developer parity includes `terry.testing_utils.single_route_backtest`,
 `two_routes_backtest`, and `two_data_routes_backtest`. The project-level
 `terry-strategy-tests` skill is shared through `.claude/skills` and `.agents/skills`.
+Terry also accepts Jesse's capitalized model imports, historical `jesse.store.store` facade,
+and `jesse.services.logger` calls when unchanged strategy sources are loaded.
 
 This is research compatibility, not total product parity: Terry deliberately uses SQLite and a
 local FastAPI/JavaScript dashboard, uses bounded local threads instead of Ray, and does not contain
@@ -240,6 +243,10 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
+- 0.2.3 — Jesse lifecycle/order/accounting parity: zero-based strategy index, termination hooks,
+  isolated liquidation, futures/spot balance validation, tiered exit preservation, order sorting,
+  trade metadata, the complete public helper surface, capitalized model/store/logger imports, and
+  dashboard session-detail safety.
 - 0.2.2 — Jesse-compatible MCP schemas/envelopes, session filters and source snapshots; unchanged
   `jesse.*` strategy imports; testing helpers and shared agent skill; titled dashboard sessions.
 - 0.2.1 — concurrent local research workers; Jesse fitness and ML diagnostics; isolated shared

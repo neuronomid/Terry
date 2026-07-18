@@ -29,11 +29,11 @@ as full product parity.
 
 | Area | Jesse 2.5 baseline | Terry 0.2 status | Evidence / difference |
 |---|---|---|---|
-| Strategy lifecycle and smart orders | Yes | Compatible | Every public method/property name on Jesse's `Strategy` is represented; smart market/limit/stop inference, scale-in/out, stops, targets, filters, hooks, and same-candle flips are exercised by engine tests. |
-| Order, Position, ClosedTrade developer API | Yes | Compatible for research | Jesse status aliases, signed remaining quantity, ROI/cost, direction/state properties, serialization, mark/funding/liquidation fields are present. Live-only values are placeholders in historical mode. |
+| Strategy lifecycle and smart orders | Yes | Compatible | Every public method/property name on Jesse's `Strategy` is represented; zero-based candle index, entry/filter state, smart market/limit/stop inference, deterministic intrabar sorting, scale-in/out, tiered stops/targets, callbacks, termination hooks, and same-candle flips are exercised by engine tests. |
+| Order, Position, ClosedTrade developer API | Yes | Compatible for research | Jesse status aliases, signed remaining quantity, ROI/cost, direction/state properties, serialization, trade/order IDs, timeframe/session metadata, mark/funding/liquidation fields, and capitalized model imports are present. Live-only values are placeholders in historical mode. |
 | Indicators | 174 public modules in audited repository | 174/174 modules | Module names match. Existing numerical cross-checks cover the exported indicator set; named-tuple and sequential behavior have regression tests. |
-| Utilities | Jesse public utility functions | Public surface matched | Added sequential `crossed`, signal lines, streaks, strict trends, float math, `dd`, timeframe conversion, exact Engle-Granger cointegration, and Jesse fee/floor sizing semantics. |
-| Historical engine | Spot + futures, multiple routes/timeframes | Compatible local engine | 44 metric keys, smart orders, fees, leverage modes, spot restrictions, warm-up/data routes, multiple symbols, cancellation, and exports. One research run still uses one selected exchange, matching Jesse's draft form. |
+| Helpers and utilities | 120 helper + 23 utility functions | Public names/signatures matched | Jesse's complete public helper and utility names and keyword-compatible signatures are present, including timestamps/Arrow, config/mode checks, symbols, order-book math, PNL, DNA, formatting, cleaning/compression, sequential `crossed`, signal lines, streaks, float math, cointegration, and fee/floor sizing semantics. Live-only helper paths report Terry's explicit no-live boundary. |
+| Historical engine | Spot + futures, multiple routes/timeframes | Compatible local engine | 44 metric keys, smart orders, exact fee/balance handling, futures margin enforcement, spot reservations and exit limits, cross/isolated leverage with liquidation, warm-up/data routes, multiple symbols, cancellation, and exports. One research run still uses one selected exchange, matching Jesse's draft form. |
 | Historical exchanges | 10 enabled markets | 10 markets | Binance Spot, Binance US Spot, Binance Perpetual Futures, Bitfinex Spot, Coinbase Spot, Bybit USDT/USDC Perpetual, Bybit Spot, Gate USDT Perpetual, Kraken Pro Futures. All ten real public response paths were checked on the audit date; offline fixtures guard normalization. |
 | Research candle API | get/store/factories | Compatible | SQLite-backed `get_candles`, `store_candles`, `fake_candle`, `fake_range_candles`, and close-price factories. Terry also offers a blocking notebook import helper. |
 | Backtest exports | CSV, JSON, TradingView, charts, benchmark | Implemented | Pure API and MCP runner support CSV, JSON, Pine v5, six PNG chart outputs, logs, hyperparameters, equity curve, and buy-and-hold benchmark. |
@@ -43,7 +43,7 @@ as full product parity.
 | ML research/deploy | Gather, sklearn train, artifacts, inference | Core API implemented | Chronological splits, binary/multiclass/regression metrics, model/scaler artifacts, Jesse-shaped RFE/F-test/correlation/CV-removal consensus diagnostics, per-feature retraining impact, calibration bins, CSV loading, and lazy Strategy inference. Jesse's verbose console presentation is not code-identical. |
 | Optimization | Optuna + Ray, explicit train/test windows | API/results compatible, execution differs | Optuna TPE, hyperparameter types, trials-per-parameter, explicit OOS windows, legacy split, DNA, Jesse's normalized/trade-count-weighted fitness, train/test metrics, best candidates, and bounded `cpu_cores` workers. Terry uses local worker threads instead of a Ray cluster. Smart objectives remain Terry extensions mapped to their corresponding historical ratio because Jesse's audited metric payload does not emit separate smart-ratio keys. |
 | MCP | 58 tools, 12 resources | 58 tools, 12 resources | Tool names match except the expected product rename `get_jesse_status` → `get_terry_status`; all resource topics exist under `terry://`, including optimization. Jesse-leading schemas, success/error actions, draft/session envelopes, nested dashboard state, session filters, structured notes/source snapshots, retryable candle import IDs, and candle/config/indicator/strategy results are covered by contract tests. Terry shorthand remains available as keyword-only extensions. |
-| Browser frontend | Nuxt/Vue, Monaco, research/live screens | Research workflow implemented, UI not code-identical | Local responsive dashboard has an IDE-like editor with line numbers/indentation/save shortcut, multi-route and data-route inputs, worker/optimization/pipeline controls, imports, settings, titled session notes/source snapshots, history, all research modes, metrics, reports, auth, and accessibility controls. It is vanilla JS/FastAPI rather than Nuxt/Monaco, and it has no live account/execution screens. |
+| Browser frontend | Nuxt/Vue, Monaco, research/live screens | Research workflow implemented, UI not code-identical | Local responsive dashboard has an IDE-like editor with line numbers/indentation/save shortcut, multi-route and data-route inputs, worker/optimization/pipeline controls, imports, settings, editable/deletable titled sessions, notes/source snapshots, history, all research modes, metrics, reports, auth, guarded destructive actions, unsaved-change protection, and accessibility controls. It is vanilla JS/FastAPI rather than Nuxt/Monaco, and it has no live account/execution screens. |
 | Storage/runtime | PostgreSQL, Redis, multiple services | Deliberately different | SQLite candle/session/config files and local background threads; no Redis or Postgres required. |
 | Live/paper trading | Separate plugin/product capability | Not implemented | Explicit project boundary. No credentials, account management, live orders, notifications, DEX, or multiple-account execution. |
 
@@ -77,21 +77,36 @@ as full product parity.
     `.claude/skills`.
 13. Added session titles and research notes to the browser forms/history/results, backed by the
     same persisted note metadata and strategy snapshots exposed through MCP.
+14. Replayed Jesse's unchanged strategy regression corpus and fixed lifecycle ordering, zero-based
+    indexing, order priority/replacement, partial exits, trade metadata, isolated liquidation,
+    futures margin, spot asset reservations, and strategy termination behavior.
+15. Added Jesse-compatible capitalized core model modules, the historical global-store facade,
+    logger service, and all 120 public helper functions with Jesse's keyword-compatible
+    signatures; 142/143 upstream regression strategies now load unchanged (the remaining file is
+    intentionally fully commented and defines no strategy class).
+16. Audited the dashboard against the current Web Interface Guidelines and added session
+    rename/delete controls, guarded cancellation, unsaved-note protection, cached `Intl` number
+    and date formatting, restored focus visibility, and coarse-pointer touch targets.
 
 ## Verification
 
-- Offline suite: `python -m pytest -q` — **53 passed** (engine, dashboard/API, model/util
+- Offline suite: `python -m pytest -q` — **60 passed** (engine, dashboard/API, model/helper/util
   parity, exchange payloads, research signatures/results, ML artifacts, candle pipelines,
   optimizer, plotting, resources).
 - Dependency integrity: `python -m pip check`.
 - Package integrity: `python -m pip wheel --no-deps .` produced
-  `terry_trade-0.2.2-py3-none-any.whl` with the expected metadata.
+  `terry_trade-0.2.3-py3-none-any.whl` with the expected metadata.
 - Syntax integrity: `python -m compileall -q terry` and `git diff --check`.
 - Browser smoke test: headless Chrome rendered the strategy editor and Monte Carlo form with the
   new line gutter, status bar, worker, pipeline, and advanced-route controls.
-- Public-surface audit: 174/174 indicator modules; no missing public `Strategy` or utility names;
-  all 17 `terry.research` exports and their Jesse-leading argument order; 58 MCP tools and 12
-  resources (with the expected Terry product-name substitutions).
+- Public-surface audit: 174/174 indicator modules; no missing public `Strategy` names; exact
+  120/120 helper and 23/23 utility function names/signature shapes; all upstream enum values and
+  exception names; all 17 `terry.research` exports and their Jesse-leading argument order; 58 MCP
+  tools and 12 resources (with the expected Terry product-name substitutions).
+- Upstream strategy audit: 142/143 Jesse regression strategy files load unchanged; the sole
+  non-loadable file contains only comments. All 120 literal upstream historical-helper calls
+  match their expected outcome: 101 complete successfully and 19 raise the expected validation
+  path, with zero unexpected outcomes.
 - MCP contract audit: Jesse-leading parameters for all 58 tools, structured success/error
   envelopes, serialized details for 174/174 indicators, nested draft/session state, source
   snapshots, filtered pagination, and a full local create/draft/read/update/list workflow.

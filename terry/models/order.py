@@ -1,5 +1,5 @@
 from .. import helpers as jh
-from ..enums import order_statuses, order_types, sides
+from ..enums import order_statuses, order_submitted_via, sides
 from ._compat import CallableDict
 
 
@@ -22,6 +22,8 @@ class Order:
         self.executed_at = attributes.get("executed_at")
         self.role = attributes.get("role")
         self.submitted_via = attributes.get("submitted_via")
+        self.reserved_quote = attributes.get("reserved_quote", 0.0)
+        self.trade_id = attributes.get("trade_id")
 
     # ---- status helpers ----
     @property
@@ -66,11 +68,11 @@ class Order:
 
     @property
     def is_stop_loss(self):
-        return self.role == "CLOSE POSITION" and self.type == order_types.STOP
+        return self.submitted_via == order_submitted_via.STOP_LOSS
 
     @property
     def is_take_profit(self):
-        return self.role == "CLOSE POSITION" and self.type == order_types.LIMIT
+        return self.submitted_via == order_submitted_via.TAKE_PROFIT
 
     @property
     def value(self):
@@ -108,4 +110,5 @@ class Order:
             "executed_at": self.executed_at,
             "role": self.role,
             "reduce_only": self.reduce_only,
+            "trade_id": self.trade_id,
         })

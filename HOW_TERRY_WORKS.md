@@ -188,6 +188,8 @@ Key ideas:
 - **Sizing:** never hardcode a quantity — use `utils.size_to_qty(...)` or `utils.risk_to_qty(...)`.
 - **Spot vs futures:** on spot you can't short and you set stops in `on_open_position`. On futures
   you can do both directions.
+- **Jesse source compatibility:** static `jesse.*` imports are translated when strategies load,
+  including capitalized model imports, the historical store facade, and strategy logger calls.
 - Full reference: ask the agent to read the resource `terry://strategy`, or see
   `terry/mcp/resources.py`.
 
@@ -245,7 +247,9 @@ accept Jesse's reusable `import_id` retry flow.
 Unchanged strategy files that statically import `jesse.strategies`, `jesse.indicators`, or
 `jesse.utils` are translated by Terry's loader. Backend contributors can use
 `terry.testing_utils` and the bundled `terry-strategy-tests` agent skill for deterministic
-single-route, multi-route, and data-route lifecycle tests.
+single-route, multi-route, and data-route lifecycle tests. The translated strategy environment
+also exposes Jesse's complete 120-function public helper surface, core capitalized model imports,
+historical store facade, and strategy logger.
 
 Terry's open research surface is audited against Jesse 2.5.0. Live and paper exchange execution,
 exchange accounts, and live notifications are not included; the full matrix is in

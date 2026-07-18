@@ -22,7 +22,7 @@ from terry import utils
 
 class DashboardTrade(Strategy):
     def should_long(self):
-        return self.index == 1
+        return self.index == 0
     def should_short(self):
         return False
     def go_long(self):
@@ -231,8 +231,15 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "Candle Pipeline" in source and "pipeline_params_json" in source
     assert "Session Title" in source and "Research Notes" in source
     assert "notes_metadata?.title" in source
+    assert "new Intl.NumberFormat" in source and "new Intl.DateTimeFormat" in source
+    assert "data-delete-session" in source and "Delete this saved session?" in source
+    assert "data-title" in source and "Save Details" in source
+    assert "research note changes" not in source
+    assert "session detail changes" in source
+    assert "Cancel this research session?" in source
     assert "prefers-reduced-motion" in styles
     assert ":focus-visible" in styles
+    assert "pointer:coarse" in styles
     assert ".pill.finished" in styles
     assert ".line-numbers" in styles and ".route-builder" in styles
 

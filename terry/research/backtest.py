@@ -20,6 +20,7 @@ from ..engine.metrics import trades_metrics
 from ..models import Position, Route
 from ..loader import load_strategy_class, load_strategy_from_source
 from ..exceptions import InvalidRoutes
+from ..store import set_current_store
 
 
 def _make_exchange(config):
@@ -52,6 +53,9 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
     candles = candles or {}
 
     store = Store()
+    # Make Jesse's process-global-looking ``store`` import resolve to this
+    # backtest's isolated state for strategy constructors and lifecycle hooks.
+    set_current_store(store)
     exchange = _make_exchange(config)
     store.add_exchange(exchange)
     store.app.trading_mode = "backtest"
@@ -119,13 +123,20 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
     sim.signal_only = signal_only
     for r in route_objs:
         r.strategy.simulator = sim
+        r.strategy.broker = sim
         r.strategy.store_routes = route_objs
 
     del fast_mode  # Terry's single engine already uses the streamlined execution path.
-    run_out = sim.run(
-        generate_equity_curve=generate_equity_curve or benchmark or generate_charts,
-        should_cancel=should_cancel,
-    )
+    store.app.is_active = True
+    try:
+        run_out = sim.run(
+            generate_equity_curve=generate_equity_curve or benchmark or generate_charts,
+            should_cancel=should_cancel,
+        )
+    finally:
+        # Keep the historical store inspectable through the Jesse facade while
+        # preventing later session/config timestamps from reusing candle time.
+        store.app.is_active = False
 
     metrics = trades_metrics(
         store.closed_trades, store.app.daily_balance,
@@ -138,7 +149,8 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
     result = {
         "metrics": metrics,
         "trades": trades,
-        "logs": sim.logs if generate_logs else None,
+        "logs": ([*sim.logs, *store.logs.info, *store.logs.errors]
+                 if generate_logs else None),
         "ml_data": [point for route in route_objs
                     for point in route.strategy._ml_data_points],
     }
@@ -203,9 +215,13 @@ def _apply_candle_pipelines(store, routes, data_routes, pipeline_class, pipeline
 
 def _resolve_hp(strategy, overrides):
     """Build the hp dict from the strategy's hyperparameters() defaults + any overrides."""
+    definitions = strategy.hyperparameters()
     hp = {}
-    for p in strategy.hyperparameters():
+    for p in definitions:
         hp[p["name"]] = p.get("default")
+    dna = strategy.dna()
+    if dna:
+        hp.update(jh.dna_to_hp(definitions, dna))
     if overrides:
         hp.update({k: v for k, v in overrides.items() if k in hp})
     return hp

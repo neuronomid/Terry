@@ -1,4 +1,7 @@
 from ..enums import exchange_types
+from ..exceptions import InsufficientBalance, InsufficientMargin
+from ..enums import order_types
+from ..utils import subtract_floats, sum_floats
 
 
 class Exchange:
@@ -46,19 +49,87 @@ class Exchange:
 
     # --------------------------------------------------------------- mutation
     def charge_fee(self, fee):
-        self.assets[self.quote_asset] -= fee
+        self.assets[self.quote_asset] = subtract_floats(
+            self.assets[self.quote_asset], fee)
 
     def add_realized_pnl(self, pnl):
-        self.assets[self.quote_asset] += pnl
+        self.assets[self.quote_asset] = sum_floats(
+            self.assets[self.quote_asset], pnl)
 
     def spend_quote(self, amount):
-        self.assets[self.quote_asset] -= amount
+        self.assets[self.quote_asset] = subtract_floats(
+            self.assets[self.quote_asset], amount)
 
     def receive_quote(self, amount):
-        self.assets[self.quote_asset] += amount
+        self.assets[self.quote_asset] = sum_floats(
+            self.assets[self.quote_asset], amount)
 
     def add_base(self, symbol, qty):
-        self.base_assets[symbol] = self.base_assets.get(symbol, 0.0) + qty
+        self.base_assets[symbol] = sum_floats(
+            self.base_assets.get(symbol, 0.0), qty)
+        base_asset = symbol.split("-", 1)[0]
+        value = sum_floats(self.assets.get(base_asset, 0.0), qty)
+        self.assets[base_asset] = 0.0 if abs(value) < 1e-12 else value
+
+    def ensure_base_asset(self, symbol):
+        base_asset = symbol.split("-", 1)[0]
+        self.assets.setdefault(base_asset, 0.0)
+        self.base_assets.setdefault(symbol, 0.0)
+
+    def reserve_spot_buy(self, order):
+        if not self.is_spot or not order.is_buy:
+            return
+        amount = abs(order.qty) * order.price
+        available = self.balance
+        if amount > available + 1e-12:
+            raise InsufficientBalance(
+                f"Not enough balance. Available balance at {self.name} for "
+                f"{self.quote_asset} is {available} but you're trying to spend {amount}")
+        self.spend_quote(amount)
+        order.reserved_quote = amount
+
+    def validate_order_submission(self, order):
+        """Reject orders that exceed Jesse's simulated margin/asset limits."""
+        if self.is_futures:
+            if not order.reduce_only:
+                required_margin = order.value / self.leverage
+                if required_margin > self.available_margin + 1e-12:
+                    raise InsufficientMargin(
+                        f"Cannot submit an order with a value of "
+                        f"${round(order.qty * order.price)} when your available "
+                        f"margin is ${round(self.available_margin)}. Consider "
+                        "increasing leverage number from the settings or reducing "
+                        "the order size."
+                    )
+            return
+
+        if not order.is_sell:
+            return
+        base_asset = order.symbol.split("-", 1)[0]
+        base_balance = self.assets.get(base_asset, 0.0)
+        active_sells = [
+            candidate for candidate in self.store.orders.active_orders(order.symbol)
+            if candidate.is_sell
+        ]
+        if order.type == order_types.MARKET:
+            pending = sum(abs(candidate.qty) for candidate in active_sells
+                          if candidate.type == order_types.LIMIT)
+        else:
+            pending = sum(abs(candidate.qty) for candidate in active_sells
+                          if candidate.type == order.type)
+        requested = sum_floats(abs(order.qty), pending)
+        if requested > base_balance + 1e-12:
+            raise InsufficientBalance(
+                f"Not enough balance. Available balance at {self.name} for "
+                f"{base_asset} is {base_balance} but you're trying to sell "
+                f"{requested}"
+            )
+
+    def release_spot_reservation(self, order):
+        amount = getattr(order, "reserved_quote", 0.0) or 0.0
+        if amount:
+            self.receive_quote(amount)
+            order.reserved_quote = 0.0
 
     def store_time(self):
         # fills are recorded at the CLOSE time of the current 1m candle (matches Jesse)
@@ -86,13 +157,17 @@ class Exchange:
         pos_value, order_value = self._reserved_and_position_margin()
         if self.is_futures:
             used = (pos_value + order_value) / self.leverage
-            return self.balance - used
-        # spot
-        return self.balance - order_value
+            unrealized = sum(
+                position.pnl for position in self.store.positions.storage.values()
+                if position.exchange_name == self.name and position.is_open)
+            return self.balance - used + unrealized
+        # Spot buy orders are reserved from wallet balance on submission, as in Jesse.
+        return self.balance
 
     @property
     def leveraged_available_margin(self):
         return self.available_margin * self.leverage
 
+    @property
     def wallet_balance(self):
         return self.balance

@@ -16,6 +16,8 @@ class ClosedTrade:
         self.strategy_name = None
         self.symbol = None
         self.exchange = None
+        self.timeframe = None
+        self.session_id = None
         self.type = None                 # 'long' | 'short'
         self.opened_at = None            # ms
         self.closed_at = None            # ms
@@ -122,6 +124,8 @@ class ClosedTrade:
             "strategy_name": self.strategy_name,
             "symbol": self.symbol,
             "exchange": self.exchange,
+            "timeframe": self.timeframe,
+            "session_id": self.session_id,
             "type": self.type,
             "entry_price": self.entry_price,
             "exit_price": self.exit_price,

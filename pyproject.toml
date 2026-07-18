@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "terry-trade"
-version = "0.2.2"
+version = "0.2.3"
 description = "Terry — a local, self-contained Jesse-compatible crypto research framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "arrow>=1.3,<2",
+    "click>=8.1,<9",
     "mcp==1.26.0",
     "numpy>=1.26",
     "pandas>=2.0",
