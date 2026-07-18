@@ -1,17 +1,16 @@
 # Terry
 
-**Terry** is a local, self-contained **MCP-server clone of the [Jesse](https://jesse.trade) crypto
-trading framework.** It lets an AI agent (Claude Code, Cursor, …) research, build, backtest, and
-stress-test trading strategies end-to-end on your own machine — no cloud, no PostgreSQL/Redis, no
-paid credits. Data comes from Binance's free public API.
+**Terry** is a local, self-contained MCP server for crypto-strategy research, backtesting, and
+robustness analysis. It lets an AI agent (Claude Code, Cursor, …) build and test trading
+strategies end-to-end on your own machine — no cloud, PostgreSQL, Redis, or paid credits. Data
+comes from Binance's free public API.
 
 > Terry only **simulates** trades on historical data. It does not connect to exchange accounts or
 > place real orders. Past performance never guarantees future results.
 
 ## Create a Terry strategy project
 
-Clone this repository once for each independent strategy project, just as you
-would clone Jesse's project template:
+Clone this repository once for each independent strategy project:
 
 ```bash
 # change "my-bot" to your strategy project's name
@@ -68,11 +67,12 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
 ## What's inside
 
 - **Backtesting engine** — candle-by-candle, no look-ahead, spot & futures, smart orders,
-  stop-loss/take-profit, 44-metric results (validated against real Jesse output).
+  stop-loss/take-profit, and 44 performance metrics.
 - **Strategy API** — source-compatible `Strategy` base class (`should_long`/`go_long`/…).
 - **Research tools** — Rule Significance Test (bootstrap p-value), Monte Carlo (overfit/robustness),
   and hyperparameter optimization with out-of-sample validation.
-- **58 MCP tools + 11 resources** — the same tool names/semantics as Jesse's MCP server, ungated.
+- **58 MCP tools + 11 resources** — tools for strategy creation, data import, configuration,
+  backtesting, and analysis.
 - **Free data + local storage** — Binance public REST + SQLite.
 
 ## Docs
@@ -91,5 +91,4 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
 
 ## License
 
-For personal use. Jesse is a separate project by its own authors; Terry is an independent
-reimplementation for private use and is not affiliated with or endorsed by Jesse.
+For personal use.
