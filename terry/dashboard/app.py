@@ -17,8 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -31,7 +30,15 @@ from ..sessions.db import TERMINAL, VALID_KINDS
 from ..version import __version__
 
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
+_SYMBOL = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 _STATIC = Path(__file__).with_name("static")
+_AUTH_COOKIE = "terry_dashboard_session"
+_OBJECTIVES = {"sharpe_ratio", "sortino_ratio", "calmar_ratio", "net_profit_percentage"}
+_SESSION_KINDS = ("backtest", "optimization", "monte_carlo", "significance_test")
+_ENGINE_CONFIG_KEYS = {
+    "starting_balance", "fee", "type", "futures_leverage", "futures_leverage_mode",
+    "quote_asset", "warm_up_candles",
+}
 
 
 def _error(status: int, message: str, code: str = "invalid_request") -> HTTPException:
@@ -52,6 +59,77 @@ def _date(value: Any, label: str) -> str:
     except ValueError as exc:
         raise _error(422, f"{label} must use YYYY-MM-DD.") from exc
     return value
+
+
+def _integer(value: Any, label: str, minimum: int = 0) -> int:
+    """Parse an API integer without accepting booleans, fractions, or ambiguous text."""
+    if isinstance(value, bool):
+        raise _error(422, f"{label} must be an integer of at least {minimum}.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _error(422, f"{label} must be an integer of at least {minimum}.") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise _error(422, f"{label} must be an integer of at least {minimum}.")
+    if isinstance(value, str) and not re.fullmatch(r"[+-]?\d+", value.strip()):
+        raise _error(422, f"{label} must be an integer of at least {minimum}.")
+    if parsed < minimum:
+        raise _error(422, f"{label} must be an integer of at least {minimum}.")
+    return parsed
+
+
+def _number(value: Any, label: str, minimum: float = 0, *, exclusive: bool = False,
+            maximum: float | None = None) -> float:
+    if isinstance(value, bool):
+        raise _error(422, f"{label} must be a finite number.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _error(422, f"{label} must be a finite number.") from exc
+    if not math.isfinite(parsed) or (parsed <= minimum if exclusive else parsed < minimum):
+        comparator = "greater than" if exclusive else "at least"
+        raise _error(422, f"{label} must be {comparator} {minimum}.")
+    if maximum is not None and parsed > maximum:
+        raise _error(422, f"{label} must be no greater than {maximum}.")
+    return parsed
+
+
+def _boolean(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise _error(422, f"{label} must be true or false.")
+    return value
+
+
+def _symbol(value: Any) -> str:
+    symbol = str(value or "BTC-USDT").upper()
+    if not _SYMBOL.fullmatch(symbol):
+        raise _error(422, "symbol must use BASE-QUOTE format, for example BTC-USDT.")
+    return symbol
+
+
+def _validate_engine_config(payload: dict[str, Any]) -> dict[str, Any]:
+    unknown = set(payload) - _ENGINE_CONFIG_KEYS
+    if unknown:
+        raise _error(422, f"Unknown engine configuration key(s): {', '.join(sorted(unknown))}.")
+    out = dict(payload)
+    if "starting_balance" in out:
+        out["starting_balance"] = _number(out["starting_balance"], "starting_balance", exclusive=True)
+    if "fee" in out:
+        out["fee"] = _number(out["fee"], "fee", maximum=1)
+    if "futures_leverage" in out:
+        out["futures_leverage"] = _number(out["futures_leverage"], "futures_leverage", 1)
+    if "warm_up_candles" in out:
+        out["warm_up_candles"] = _integer(out["warm_up_candles"], "warm_up_candles")
+    if out.get("type") not in (None, "spot", "futures"):
+        raise _error(422, "type must be either spot or futures.")
+    if out.get("futures_leverage_mode") not in (None, "cross", "isolated"):
+        raise _error(422, "futures_leverage_mode must be either cross or isolated.")
+    if "quote_asset" in out:
+        quote = str(out["quote_asset"]).upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,12}", quote):
+            raise _error(422, "quote_asset must contain 2–12 letters or numbers.")
+        out["quote_asset"] = quote
+    return out
 
 
 def _validation_error(ctx: TerryContext, name: str) -> str | None:
@@ -110,7 +188,10 @@ def _clean_json(value: Any) -> Any:
 
 def _session_list(ctx: TerryContext, kind: str, limit: int, offset: int, query: str | None,
                   status: str | None) -> tuple[list[dict[str, Any]], int]:
-    rows = ctx.sessions.list(kind, 1_000)
+    if not (query or "").strip() and not status:
+        rows = ctx.sessions.list(kind, limit, offset)
+        return [_session_payload(row) for row in rows], ctx.sessions.count(kind)
+    rows = ctx.sessions.list(kind, None)
     query = (query or "").strip().lower()
     if query:
         rows = [row for row in rows if query in " ".join(map(str, (
@@ -139,7 +220,7 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
         raise _error(422, f"Unsupported timeframe: {timeframe}.") from exc
     state = {
         "strategy": strategy,
-        "symbol": str(payload.get("symbol") or "BTC-USDT").upper(),
+        "symbol": _symbol(payload.get("symbol")),
         "exchange": exchange,
         "timeframe": timeframe,
         "start_date": start_date,
@@ -149,8 +230,10 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
     if overrides is not None:
         if not isinstance(overrides, dict):
             raise _error(422, "config must be a JSON object.")
-        state["config"] = overrides
+        state["config"] = _validate_engine_config(overrides)
     if "hyperparameters" in payload:
+        if not isinstance(payload["hyperparameters"], dict):
+            raise _error(422, "hyperparameters must be a JSON object.")
         state["hyperparameters"] = payload["hyperparameters"]
     return state
 
@@ -158,29 +241,50 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
 def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if kind not in VALID_KINDS:
         raise _error(404, "Unknown research mode.", "unknown_mode")
+    allowed = {"strategy", "exchange", "symbol", "timeframe", "start_date", "finish_date",
+               "config", "hyperparameters", "notes", "start"}
+    allowed |= {
+        "significance_test": {"n_simulations", "hypothesis", "rationale"},
+        "monte_carlo": {"num_scenarios", "run_candles", "run_trades"},
+        "optimization": {"n_trials", "train_test_split", "objective"},
+        "backtest": set(),
+    }[kind]
+    unknown = set(payload) - allowed
+    if unknown:
+        raise _error(422, f"Unknown session field(s): {', '.join(sorted(unknown))}.")
+    for field in ("notes", "hypothesis", "rationale"):
+        if field in payload and payload[field] is not None and not isinstance(payload[field], str):
+            raise _error(422, f"{field} must be text.")
+    notes = payload.get("notes") or ""
+    if len(notes) > 20_000:
+        raise _error(422, "notes cannot exceed 20,000 characters.")
     state = _base_state(ctx, payload)
     if kind == "significance_test":
-        simulations = int(payload.get("n_simulations", 2_000))
-        if simulations < 2_000:
-            raise _error(422, "Rule Significance Test requires at least 2,000 simulations.")
-        state.update({"n_simulations": simulations, "hypothesis": str(payload.get("hypothesis", "")),
-                      "rationale": str(payload.get("rationale", ""))})
+        simulations = _integer(payload.get("n_simulations", 2_000), "n_simulations", 2_000)
+        state.update({"n_simulations": simulations, "hypothesis": str(payload.get("hypothesis") or ""),
+                      "rationale": str(payload.get("rationale") or "")})
     elif kind == "monte_carlo":
-        scenarios = int(payload.get("num_scenarios", 200))
-        if scenarios < 1:
-            raise _error(422, "num_scenarios must be positive.")
-        state.update({"num_scenarios": scenarios, "run_candles": bool(payload.get("run_candles", True)),
-                      "run_trades": bool(payload.get("run_trades", False))})
+        scenarios = _integer(payload.get("num_scenarios", 200), "num_scenarios", 1)
+        run_candles = _boolean(payload.get("run_candles", True), "run_candles")
+        run_trades = _boolean(payload.get("run_trades", False), "run_trades")
+        if not run_candles and not run_trades:
+            raise _error(422, "Enable candle resampling, trade-order shuffling, or both.")
+        state.update({"num_scenarios": scenarios, "run_candles": run_candles,
+                      "run_trades": run_trades})
     elif kind == "optimization":
-        trials = int(payload.get("n_trials", 100))
-        split = float(payload.get("train_test_split", 0.75))
-        if trials < 1 or not 0.1 < split < 0.9:
-            raise _error(422, "n_trials must be positive and train_test_split must be between 0.1 and 0.9.")
-        state.update({"objective": str(payload.get("objective", "sharpe_ratio")), "n_trials": trials,
+        trials = _integer(payload.get("n_trials", 100), "n_trials", 1)
+        split = _number(payload.get("train_test_split", 0.75), "train_test_split", 0.1, exclusive=True)
+        if split >= 0.9:
+            raise _error(422, "train_test_split must be greater than 0.1 and less than 0.9.")
+        objective = str(payload.get("objective", "sharpe_ratio"))
+        if objective not in _OBJECTIVES:
+            raise _error(422, f"objective must be one of: {', '.join(sorted(_OBJECTIVES))}.")
+        state.update({"objective": objective, "n_trials": trials,
                       "train_test_split": split})
-    sid = ctx.sessions.create(kind, state, notes=str(payload.get("notes", "")))
+    start = _boolean(payload.get("start", True), "start")
+    sid = ctx.sessions.create(kind, state, notes=notes)
     session = ctx.sessions.get(sid)
-    if payload.get("start", True):
+    if start:
         ctx.runner.run(sid)
         session = ctx.sessions.get(sid)
     return _session_payload(session)
@@ -193,28 +297,66 @@ def create_app(project_root: str | None = None) -> FastAPI:
     tokens: set[str] = set()
 
     app = FastAPI(title="Terry Dashboard", version=__version__)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                       allow_methods=["*"], allow_headers=["*"])
+
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(HTTPException)
     async def handle_http_error(_, exc: HTTPException):
         detail = exc.detail if isinstance(exc.detail, dict) else {"error": "request_failed", "message": str(exc.detail)}
         return JSONResponse(status_code=exc.status_code, content=detail)
 
-    def auth(authorization: str | None = Header(default=None), token: str | None = Query(default=None)):
-        if not password:
-            return
+    def request_token(authorization: str | None, session_cookie: str | None) -> str | None:
         bearer = (authorization or "").removeprefix("Bearer ")
-        if token not in tokens and bearer not in tokens:
+        if bearer in tokens:
+            return bearer
+        return session_cookie if session_cookie in tokens else None
+
+    def auth(authorization: str | None = Header(default=None),
+             session_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE)) -> str | None:
+        if not password:
+            return None
+        token = request_token(authorization, session_cookie)
+        if token is None:
             raise _error(401, "Sign in to continue.", "unauthorized")
+        return token
+
+    @app.get("/api/auth/status")
+    def auth_status(authorization: str | None = Header(default=None),
+                    session_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE)):
+        return {"auth_required": bool(password),
+                "authenticated": not password or request_token(authorization, session_cookie) is not None}
 
     @app.post("/api/auth/login")
-    def login(payload: dict[str, Any]):
+    def login(payload: dict[str, Any], response: Response):
         if password and not secrets.compare_digest(str(payload.get("password", "")), password):
             raise _error(401, "Incorrect password.", "invalid_credentials")
+        if not password:
+            return {"auth_token": "", "auth_required": False}
         token = secrets.token_urlsafe(32)
         tokens.add(token)
+        response.set_cookie(_AUTH_COOKIE, token, httponly=True, samesite="strict", path="/")
         return {"auth_token": token, "auth_required": bool(password)}
+
+    @app.post("/api/auth/logout")
+    def logout(response: Response, token: str | None = Depends(auth)):
+        if token:
+            tokens.discard(token)
+        response.delete_cookie(_AUTH_COOKIE, path="/", samesite="strict")
+        return {"status": "signed_out"}
 
     @app.get("/api/status")
     def status(_: None = Depends(auth)):
@@ -222,7 +364,7 @@ def create_app(project_root: str | None = None) -> FastAPI:
             "name": "Terry", "version": __version__, "auth_required": bool(password),
             "project_root": ctx.project_root, "indicators_available": len(ta.__all__),
             "supported_exchanges": list(EXCHANGES), "datasets": ctx.candle_db.existing(),
-            "sessions": {kind: len(ctx.sessions.list(kind, 1_000)) for kind in VALID_KINDS},
+            "sessions": {kind: ctx.sessions.count(kind) for kind in _SESSION_KINDS},
             "live_trading": {"available": False, "reason": "Live and paper trading are out of scope for Terry."},
         }
 
@@ -242,8 +384,11 @@ def create_app(project_root: str | None = None) -> FastAPI:
         path = _strategy_path(ctx, name)
         if path.exists():
             raise _error(409, f'Strategy "{name}" already exists.', "exists")
+        content = payload.get("content")
+        if content is not None and not isinstance(content, str):
+            raise _error(422, "Strategy content must be text.")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(payload.get("content") or _strategy_template(name)), encoding="utf-8")
+        path.write_text(content or _strategy_template(name), encoding="utf-8")
         return {"status": "created", "name": name, "validation_error": _validation_error(ctx, name)}
 
     @app.get("/api/strategies/{name}")
@@ -256,6 +401,8 @@ def create_app(project_root: str | None = None) -> FastAPI:
     @app.put("/api/strategies/{name}")
     def save_strategy(name: str, payload: dict[str, Any], _: None = Depends(auth)):
         path = _strategy_path(ctx, name)
+        if not path.exists():
+            raise _error(404, f'Strategy "{name}" was not found.', "not_found")
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise _error(422, "Strategy content cannot be empty.")
@@ -297,9 +444,7 @@ def create_app(project_root: str | None = None) -> FastAPI:
         exchange = payload.get("exchange")
         if exchange not in EXCHANGES:
             raise _error(422, f"Unknown exchange: {exchange}.")
-        symbol = str(payload.get("symbol", "")).upper()
-        if not re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+", symbol):
-            raise _error(422, "symbol must use BASE-QUOTE format, for example BTC-USDT.")
+        symbol = _symbol(payload.get("symbol"))
         start = _date(payload.get("start_date"), "start_date")
         finish = payload.get("finish_date")
         if finish:
@@ -325,6 +470,11 @@ def create_app(project_root: str | None = None) -> FastAPI:
 
     @app.delete("/api/candles/{exchange}/{symbol}")
     def delete_candles(exchange: str, symbol: str, _: None = Depends(auth)):
+        if exchange not in EXCHANGES:
+            raise _error(422, f"Unknown exchange: {exchange}.")
+        symbol = _symbol(symbol)
+        if ctx.candle_db.coverage(exchange, symbol) is None:
+            raise _error(404, "Candle dataset was not found.", "not_found")
         ctx.candle_db.delete(exchange, symbol)
         return {"status": "deleted", "exchange": exchange, "symbol": symbol}
 
@@ -342,12 +492,51 @@ def create_app(project_root: str | None = None) -> FastAPI:
             raise _error(422, f"Unknown configuration key(s): {', '.join(sorted(unknown))}.")
         if "exchange" in payload and payload["exchange"] not in EXCHANGES:
             raise _error(422, f"Unknown exchange: {payload['exchange']}.")
-        for key in ("starting_balance", "fee", "futures_leverage", "warm_up_candles"):
-            if key in payload and (not isinstance(payload[key], (int, float)) or isinstance(payload[key], bool) or payload[key] < 0):
-                raise _error(422, f"{key} must be a non-negative number.")
-        if payload.get("type") not in (None, "spot", "futures"):
-            raise _error(422, "type must be either spot or futures.")
-        return {"status": "updated", "config": ctx.config.update(payload)}
+        scalar = _validate_engine_config({key: value for key, value in payload.items()
+                                          if key in _ENGINE_CONFIG_KEYS})
+        validated = {**payload, **scalar}
+        nested_specs = {
+            "optimization": {"objective", "n_trials", "train_test_split"},
+            "monte_carlo": {"num_scenarios", "run_candles", "run_trades"},
+            "significance_test": {"n_simulations"},
+        }
+        for key, keys in nested_specs.items():
+            if key in validated:
+                value = validated[key]
+                if not isinstance(value, dict):
+                    raise _error(422, f"{key} must be a JSON object.")
+                nested_unknown = set(value) - keys
+                if nested_unknown:
+                    raise _error(422, f"Unknown {key} key(s): {', '.join(sorted(nested_unknown))}.")
+        if "optimization" in validated:
+            value = dict(validated["optimization"])
+            if "objective" in value and value["objective"] not in _OBJECTIVES:
+                raise _error(422, f"objective must be one of: {', '.join(sorted(_OBJECTIVES))}.")
+            if "n_trials" in value:
+                value["n_trials"] = _integer(value["n_trials"], "n_trials", 1)
+            if "train_test_split" in value:
+                value["train_test_split"] = _number(value["train_test_split"], "train_test_split", 0.1,
+                                                       exclusive=True)
+                if value["train_test_split"] >= 0.9:
+                    raise _error(422, "train_test_split must be greater than 0.1 and less than 0.9.")
+            validated["optimization"] = value
+        if "monte_carlo" in validated:
+            value = dict(validated["monte_carlo"])
+            if "num_scenarios" in value:
+                value["num_scenarios"] = _integer(value["num_scenarios"], "num_scenarios", 1)
+            for key in ("run_candles", "run_trades"):
+                if key in value:
+                    value[key] = _boolean(value[key], key)
+            effective = {**ctx.config.get()["monte_carlo"], **value}
+            if not effective["run_candles"] and not effective["run_trades"]:
+                raise _error(422, "Enable candle resampling, trade-order shuffling, or both.")
+            validated["monte_carlo"] = value
+        if "significance_test" in validated:
+            value = dict(validated["significance_test"])
+            if "n_simulations" in value:
+                value["n_simulations"] = _integer(value["n_simulations"], "n_simulations", 2_000)
+            validated["significance_test"] = value
+        return {"status": "updated", "config": ctx.config.update(validated)}
 
     @app.get("/api/indicators")
     def indicators(query: str = "", _: None = Depends(auth)):
@@ -390,7 +579,11 @@ def create_app(project_root: str | None = None) -> FastAPI:
         session = ctx.sessions.get(session_id)
         if session is None:
             raise _error(404, "Session was not found.", "not_found")
-        ctx.runner.run(session_id)
+        if session["status"] == "running":
+            raise _error(409, "Session is already running.", "already_running")
+        started = ctx.runner.run(session_id)
+        if started.get("error") == "worker_active":
+            raise _error(409, "The previous worker is still stopping; try again shortly.", "worker_active")
         return _session_payload(ctx.sessions.get(session_id))
 
     @app.post("/api/session/{session_id}/cancel")
@@ -398,6 +591,8 @@ def create_app(project_root: str | None = None) -> FastAPI:
         session = ctx.sessions.get(session_id)
         if session is None:
             raise _error(404, "Session was not found.", "not_found")
+        if session["status"] != "running":
+            raise _error(409, "Only a running session can be canceled.", "not_running")
         ctx.runner.cancel(session_id)
         return _session_payload(ctx.sessions.get(session_id))
 
@@ -406,14 +601,23 @@ def create_app(project_root: str | None = None) -> FastAPI:
         session = ctx.sessions.get(session_id)
         if session is None:
             raise _error(404, "Session was not found.", "not_found")
+        unknown = set(payload) - {"notes"}
+        if unknown:
+            raise _error(422, f"Unknown session field(s): {', '.join(sorted(unknown))}.")
         if "notes" in payload:
-            ctx.sessions.update_notes(session_id, str(payload["notes"]))
+            notes = str(payload["notes"] or "")
+            if len(notes) > 20_000:
+                raise _error(422, "notes cannot exceed 20,000 characters.")
+            ctx.sessions.update_notes(session_id, notes)
         return _session_payload(ctx.sessions.get(session_id))
 
     @app.delete("/api/session/{session_id}")
     def delete_session(session_id: str, _: None = Depends(auth)):
-        if ctx.sessions.get(session_id) is None:
+        session = ctx.sessions.get(session_id)
+        if session is None:
             raise _error(404, "Session was not found.", "not_found")
+        if session["status"] == "running":
+            raise _error(409, "Cancel the running session before deleting it.", "session_running")
         ctx.sessions.delete(session_id)
         return {"status": "deleted", "session_id": session_id}
 

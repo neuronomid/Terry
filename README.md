@@ -56,6 +56,12 @@ docker compose up --build
 
 The MCP endpoint is `http://localhost:9021/mcp` by default and the dashboard is at
 `http://127.0.0.1:9020`. Pass `--port` to either command if a port is already in use.
+The dashboard binds to localhost by default. To require a browser sign-in, set a password
+when starting it:
+
+```bash
+TERRY_DASHBOARD_PASSWORD='choose-a-local-password' .venv/bin/python -m terry dashboard
+```
 
 Connect Claude Code:
 

@@ -84,14 +84,28 @@ class SessionStore:
         row = cur.fetchone()
         return self._row_to_dict(row) if row else None
 
-    def list(self, kind=None, limit=50):
+    def list(self, kind=None, limit=50, offset=0):
+        params = []
+        query = "SELECT * FROM sessions"
         if kind:
-            cur = self._conn().execute(
-                "SELECT * FROM sessions WHERE kind=? ORDER BY created_at DESC LIMIT ?", (kind, limit))
-        else:
-            cur = self._conn().execute(
-                "SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,))
+            query += " WHERE kind=?"
+            params.append(kind)
+        query += " ORDER BY created_at DESC"
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend((int(limit), int(offset)))
+        elif offset:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(int(offset))
+        cur = self._conn().execute(query, params)
         return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    def count(self, kind=None):
+        if kind:
+            row = self._conn().execute("SELECT COUNT(*) FROM sessions WHERE kind=?", (kind,)).fetchone()
+        else:
+            row = self._conn().execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return int(row[0])
 
     def purge(self, kind, days_old=None):
         conn = self._conn()

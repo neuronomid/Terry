@@ -115,7 +115,9 @@ def run_session(session_id, kind):
     if s["status"] not in ("draft", "stopped", "terminated", "canceled"):
         # allow re-running finished by resetting to draft-like start
         pass
-    ctx.runner.run(session_id)
+    started = ctx.runner.run(session_id)
+    if started.get("error"):
+        return started
     return {"status": "started", "session_id": session_id,
             "message": f"{kind} started. Poll get_{_poll_name(kind)}_session(session_id) until terminal."}
 
@@ -130,6 +132,10 @@ def cancel_session(session_id, kind, new_status="canceled"):
     s = ctx.sessions.get(session_id)
     if s is None:
         return {"error": "not_found", "session_id": session_id}
+    if s["kind"] != kind:
+        return {"error": "wrong_kind", "message": f"Session {session_id} is a {s['kind']}."}
+    if s["status"] != "running":
+        return {"error": "not_running", "status": s["status"], "session_id": session_id}
     return ctx.runner.cancel(session_id, new_status)
 
 

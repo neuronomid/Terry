@@ -13,6 +13,8 @@ backtest, and stress-test strategies locally. Free Binance data, SQLite storage,
 
 Browser dashboard (separate local process):
     .venv/bin/python -m terry dashboard    # http://127.0.0.1:9020
+Optional browser password:
+    TERRY_DASHBOARD_PASSWORD='choose-a-local-password' .venv/bin/python -m terry dashboard
 
 ## 2. Connect an agent
     claude mcp add --transport http terry http://localhost:9021/mcp      # then /mcp to verify
@@ -194,6 +196,9 @@ JSON/CSV exports, indicators, and saved settings. Minor known gap: cumulative mo
 differ a fraction of a percent (Terry's default size_to_qty uses a slightly simpler fee term than
 Jesse's 1 - fee_rate*3 + floor); trade entries/exits are unaffected. Not built (by design):
 live/paper trading and Ray parallelism.
+
+Dashboard API requests are same-origin, use strict validation and security headers, and can be
+protected by an HttpOnly same-site session cookie via `TERRY_DASHBOARD_PASSWORD`.
 
 ## 14. Not available
 Live/paper trading (simulation only; the dashboard labels it unavailable). Gmail/Calendar/Drive MCP connectors are unrelated to Terry and

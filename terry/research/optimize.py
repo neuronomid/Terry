@@ -42,7 +42,7 @@ def optimize(config, routes, data_routes=None, candles=None, warmup_candles=None
              hp_space=None, objective="sharpe_ratio", n_trials=100, random_seed=42,
              train_test_split=0.75, min_trades=5,
              strategies_dir=None, strategy_classes=None, strategy_sources=None,
-             progress_callback=None):
+             progress_callback=None, should_cancel=None):
     """
     hp_space: the strategy's hyperparameters() list. If None, it is read from the strategy.
     Splits the candle series into train/test by time; optimizes on train, validates on test.
@@ -62,11 +62,14 @@ def optimize(config, routes, data_routes=None, candles=None, warmup_candles=None
     rng = np.random.default_rng(random_seed)
     trials = []
     for i in range(n_trials):
+        if should_cancel and should_cancel():
+            raise InterruptedError("Research run canceled")
         hp = {p["name"]: _sample(p, rng) for p in hp_space}
         try:
             train_m = backtest(config, routes, data_routes, train_c, warmup_candles=warmup_candles,
                                hyperparameters=hp, strategies_dir=strategies_dir,
-                               strategy_classes=strategy_classes, strategy_sources=strategy_sources)["metrics"]
+                               strategy_classes=strategy_classes, strategy_sources=strategy_sources,
+                               should_cancel=should_cancel)["metrics"]
         except Exception as e:
             continue
         if train_m.get("total", 0) < min_trades:
@@ -83,10 +86,13 @@ def optimize(config, routes, data_routes=None, candles=None, warmup_candles=None
 
     # out-of-sample validation of the top candidates
     for t in top:
+        if should_cancel and should_cancel():
+            raise InterruptedError("Research run canceled")
         try:
             test_m = backtest(config, routes, data_routes, test_c, warmup_candles=warmup_candles,
                               hyperparameters=t["hp"], strategies_dir=strategies_dir,
-                              strategy_classes=strategy_classes, strategy_sources=strategy_sources)["metrics"]
+                              strategy_classes=strategy_classes, strategy_sources=strategy_sources,
+                              should_cancel=should_cancel)["metrics"]
             t["test_score"] = _score(test_m, objective)
             t["test_metrics"] = _slim(test_m)
         except Exception:

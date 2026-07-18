@@ -187,7 +187,7 @@ class Simulator:
         self.signal_log.append((int(self.store.app.time), close, signal))
 
     # --------------------------------------------------------------- run
-    def run(self, generate_equity_curve=False):
+    def run(self, generate_equity_curve=False, should_cancel=None):
         store = self.store
         app = store.app
 
@@ -206,6 +206,8 @@ class Simulator:
         last_day = None
 
         for i in range(n):
+            if should_cancel and should_cancel():
+                raise InterruptedError("Research run canceled")
             app.index_1m = i
             app.time = store.candles.raw_1m[base_key][i, 0]
 

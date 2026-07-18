@@ -37,7 +37,7 @@ def _make_exchange(config):
 def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None,
              generate_equity_curve=False, hyperparameters=None,
              strategies_dir=None, strategy_classes=None, strategy_sources=None,
-             signal_only=False):
+             signal_only=False, should_cancel=None):
     """
     Run a single backtest. Strategy classes are resolved (in priority order) from
     `strategy_classes` (name->class), `strategy_sources` (name->source), or the
@@ -111,7 +111,7 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
         r.strategy.simulator = sim
         r.strategy.store_routes = route_objs
 
-    run_out = sim.run(generate_equity_curve=generate_equity_curve)
+    run_out = sim.run(generate_equity_curve=generate_equity_curve, should_cancel=should_cancel)
 
     metrics = trades_metrics(
         store.closed_trades, store.app.daily_balance,
@@ -138,5 +138,5 @@ def _resolve_hp(strategy, overrides):
     for p in strategy.hyperparameters():
         hp[p["name"]] = p.get("default")
     if overrides:
-        hp.update({k: v for k, v in overrides.items() if k in hp or True})
+        hp.update({k: v for k, v in overrides.items() if k in hp})
     return hp

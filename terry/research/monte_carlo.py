@@ -54,14 +54,15 @@ def _resample_candles(candles_1m, rng, block=60):
 def monte_carlo_candles(config, routes, data_routes=None, candles=None, warmup_candles=None,
                         hyperparameters=None, num_scenarios=200, random_seed=42, block=60,
                         strategies_dir=None, strategy_classes=None, strategy_sources=None,
-                        progress_callback=None):
+                        progress_callback=None, should_cancel=None):
     data_routes = data_routes or []
     candles = candles or {}
 
     def _run(cndls):
         return backtest(config, routes, data_routes, cndls, warmup_candles=warmup_candles,
                         hyperparameters=hyperparameters, strategies_dir=strategies_dir,
-                        strategy_classes=strategy_classes, strategy_sources=strategy_sources)["metrics"]
+                        strategy_classes=strategy_classes, strategy_sources=strategy_sources,
+                        should_cancel=should_cancel)["metrics"]
 
     original = _run(candles)
 
@@ -69,6 +70,8 @@ def monte_carlo_candles(config, routes, data_routes=None, candles=None, warmup_c
     collected = {k: [] for k in KEY_METRICS}
     completed = 0
     for s in range(num_scenarios):
+        if should_cancel and should_cancel():
+            raise InterruptedError("Research run canceled")
         resampled = {}
         for key, v in candles.items():
             resampled[key] = {**v, "candles": _resample_candles(v["candles"], rng, block)}
@@ -103,7 +106,8 @@ def monte_carlo_candles(config, routes, data_routes=None, candles=None, warmup_c
     }
 
 
-def monte_carlo_trades(trades, num_scenarios=1000, random_seed=42, starting_balance=10000.0):
+def monte_carlo_trades(trades, num_scenarios=1000, random_seed=42, starting_balance=10000.0,
+                       should_cancel=None):
     """Shuffle trade order and report the distribution of max drawdown (path-dependent)."""
     pnls = np.array([t["PNL"] for t in trades], dtype=float)
     if len(pnls) < 2:
@@ -117,7 +121,12 @@ def monte_carlo_trades(trades, num_scenarios=1000, random_seed=42, starting_bala
 
     original_dd = _max_dd(np.arange(len(pnls)))
     rng = np.random.default_rng(random_seed)
-    dds = np.array([_max_dd(rng.permutation(len(pnls))) for _ in range(num_scenarios)])
+    dds = []
+    for _ in range(num_scenarios):
+        if should_cancel and should_cancel():
+            raise InterruptedError("Research run canceled")
+        dds.append(_max_dd(rng.permutation(len(pnls))))
+    dds = np.asarray(dds)
     summary = {"original": original_dd}
     for name, p in PERCENTILES.items():
         summary[name] = float(np.percentile(dds, p))

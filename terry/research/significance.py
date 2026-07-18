@@ -19,14 +19,15 @@ MIN_OBSERVATIONS = 30
 
 def rule_significance_test(config, routes, data_routes=None, candles=None, warmup_candles=None,
                            hyperparameters=None, n_simulations=2000, random_seed=42,
-                           strategies_dir=None, strategy_classes=None, strategy_sources=None):
+                           strategies_dir=None, strategy_classes=None, strategy_sources=None,
+                           progress_callback=None, should_cancel=None):
     if len(routes) != 1:
         raise ValueError("rule_significance_test() requires exactly one trading route.")
 
     res = backtest(config, routes, data_routes or [], candles or {}, warmup_candles=warmup_candles,
                    hyperparameters=hyperparameters, strategies_dir=strategies_dir,
                    strategy_classes=strategy_classes, strategy_sources=strategy_sources,
-                   signal_only=True)
+                   signal_only=True, should_cancel=should_cancel)
     signal_log = res["signals"]
     if len(signal_log) < 3:
         raise ValueError("Not enough bars to run a significance test.")
@@ -48,7 +49,8 @@ def rule_significance_test(config, routes, data_routes=None, candles=None, warmu
     rule_returns = signals * detrended
     observed_mean = float(rule_returns.mean()) if n_obs else 0.0
 
-    sim_means = _bootstrap(rule_returns, observed_mean, n_simulations, random_seed)
+    sim_means = _bootstrap(rule_returns, observed_mean, n_simulations, random_seed,
+                           progress_callback=progress_callback, should_cancel=should_cancel)
     p_value = float(np.mean(sim_means >= observed_mean)) if len(sim_means) else 1.0
 
     return {
@@ -64,14 +66,26 @@ def rule_significance_test(config, routes, data_routes=None, candles=None, warmu
     }
 
 
-def _bootstrap(rule_returns, observed_mean, n_simulations, random_seed):
+def _bootstrap(rule_returns, observed_mean, n_simulations, random_seed,
+               progress_callback=None, should_cancel=None):
     if len(rule_returns) == 0:
         return np.array([])
     centered = rule_returns - observed_mean
     rng = np.random.default_rng(random_seed)
     n = len(centered)
-    idx = rng.integers(0, n, size=(n_simulations, n))
-    return centered[idx].mean(axis=1)
+    # Bound the temporary index matrix to roughly 16 MB. A single allocation of
+    # (n_simulations, n_observations) can otherwise exhaust memory on 1m tests.
+    chunk_size = max(1, min(n_simulations, 2_000_000 // n))
+    means = np.empty(n_simulations, dtype=float)
+    for start in range(0, n_simulations, chunk_size):
+        if should_cancel and should_cancel():
+            raise InterruptedError("Research run canceled")
+        finish = min(start + chunk_size, n_simulations)
+        idx = rng.integers(0, n, size=(finish - start, n))
+        means[start:finish] = centered[idx].mean(axis=1)
+        if progress_callback:
+            progress_callback(finish, n_simulations)
+    return means
 
 
 def _verdict(p):

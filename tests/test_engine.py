@@ -7,7 +7,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from terry.research.backtest import backtest
+from terry.research.backtest import backtest, _resolve_hp
+from terry.research.significance import _bootstrap
 from terry.factories import candles_from_close_prices
 from terry.strategy import Strategy
 import terry.indicators as ta
@@ -192,6 +193,44 @@ def test_no_trades_when_never_entering():
             pass
     res = _run(Never)
     assert res["metrics"] == {"total": 0, "win_rate": 0, "net_profit_percentage": 0}
+
+
+def test_backtest_cooperatively_cancels():
+    with pytest.raises(InterruptedError, match="canceled"):
+        backtest(
+            FUT_CONFIG,
+            [{"exchange": "B", "symbol": "BTC-USDT", "timeframe": "1h", "strategy": "SmaCross"}],
+            [],
+            {"B-BTC-USDT": {"exchange": "B", "symbol": "BTC-USDT", "candles": _trend_candles(2_000)}},
+            generate_equity_curve=True,
+            strategy_classes={"SmaCross": SmaCross},
+            should_cancel=lambda: True,
+        )
+
+
+def test_unknown_hyperparameters_are_not_injected():
+    class Parameterized(Strategy):
+        def should_long(self):
+            return False
+
+        def go_long(self):
+            pass
+
+        def hyperparameters(self):
+            return [{"name": "period", "type": int, "min": 2, "max": 20, "default": 10}]
+
+    assert _resolve_hp(Parameterized(), {"period": 12, "unexpected": "value"}) == {"period": 12}
+
+
+def test_significance_bootstrap_is_chunked_and_cancelable():
+    progress = []
+    values = np.linspace(-0.01, 0.01, 10_000)
+    means = _bootstrap(values, float(values.mean()), 25, 42,
+                       progress_callback=lambda done, total: progress.append((done, total)))
+    assert len(means) == 25
+    assert progress[-1] == (25, 25)
+    with pytest.raises(InterruptedError, match="canceled"):
+        _bootstrap(values, 0, 25, 42, should_cancel=lambda: True)
 
 
 if __name__ == "__main__":
