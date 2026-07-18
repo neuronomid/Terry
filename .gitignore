@@ -1,0 +1,26 @@
+# virtualenv
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# terry local data (candles, sessions, reports, config)
+storage/*.db
+storage/*.db-wal
+storage/*.db-shm
+storage/reports/
+storage/config.json
+!storage/.gitkeep
+!storage/reports/
+!storage/reports/.gitkeep
+
+# user strategies are yours to keep; comment out the next line to version them
+# strategies/
+
+# os
+.DS_Store
+.env

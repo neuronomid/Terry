@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "terry": {
+      "type": "http",
+      "url": "http://localhost:9021/mcp"
+    }
+  }
+}

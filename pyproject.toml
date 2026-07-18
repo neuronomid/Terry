@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terry-trade"
+version = "0.1.0"
+description = "Terry — a local, self-contained MCP-server clone of the Jesse crypto trading framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp==1.26.0",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "requests>=2.31",
+    "scipy>=1.11",
+    "jesse-rust==1.2.0",
+]
+
+[project.scripts]
+terry = "terry.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["terry*"]

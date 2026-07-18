@@ -1,0 +1,10 @@
+services:
+  terry:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: terry serve --port ${TERRY_PORT:-9021} --project /app
+    ports:
+      - "${TERRY_PORT:-9021}:${TERRY_PORT:-9021}"
+    volumes:
+      - .:/app
