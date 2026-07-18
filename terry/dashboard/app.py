@@ -823,4 +823,6 @@ def create_app(project_root: str | None = None) -> FastAPI:
 def run(port: int = 9020, host: str = "127.0.0.1", project_root: str | None = None) -> None:
     """Run the dashboard with Uvicorn."""
     import uvicorn
+    url = f"http://{host}:{port}"
+    print(f"\n  ✓ Terry Dashboard running at {url}\n")
     uvicorn.run(create_app(project_root), host=host, port=port, log_level="info")

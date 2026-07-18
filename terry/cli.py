@@ -7,8 +7,18 @@ from .version import __version__
 
 
 def _cmd_serve(args):
-    from .mcp.server import run
-    run(port=args.port, project_root=args.project)
+    import threading
+    from .dashboard import run as run_dashboard
+    from .mcp.server import run as run_mcp
+
+    dashboard_thread = threading.Thread(
+        target=run_dashboard,
+        kwargs={"port": args.dashboard_port, "host": args.host, "project_root": args.project},
+        daemon=True,
+    )
+    dashboard_thread.start()
+
+    run_mcp(port=args.port, project_root=args.project)
 
 
 def _cmd_dashboard(args):
@@ -32,7 +42,8 @@ def _cmd_init(args):
     print(f"Initialized Terry project at {root}")
     print(f"  strategies/  ({len(os.listdir(strategies))} strategies)")
     print("  storage/     (candles.db, sessions.db, reports/ will be created here)")
-    print("\nNext: `terry serve` then connect your agent to http://localhost:9021/mcp")
+    print("\nNext: `terry serve` (starts the MCP server + dashboard), "
+          "then connect your agent to http://localhost:9021/mcp")
 
 
 def _cmd_doctor(args):
@@ -88,8 +99,10 @@ def main(argv=None):
     p.add_argument("--version", action="version", version=f"Terry {__version__}")
     sub = p.add_subparsers(dest="command")
 
-    s = sub.add_parser("serve", help="Start the MCP server")
-    s.add_argument("--port", type=int, default=9021)
+    s = sub.add_parser("serve", help="Start the MCP server and the local dashboard")
+    s.add_argument("--port", type=int, default=9021, help="MCP server port")
+    s.add_argument("--dashboard-port", type=int, default=9020, help="Dashboard port")
+    s.add_argument("--host", type=str, default="127.0.0.1", help="Dashboard host")
     s.add_argument("--project", type=str, default=None)
     s.set_defaults(func=_cmd_serve)
 

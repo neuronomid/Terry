@@ -13,6 +13,67 @@ no cloud account and no paid services.
 
 ---
 
+## Quick start: the 10-step workflow
+
+If you don't code, this is the whole loop — every step is something you *tell your agent to do* in
+plain English, not something you type yourself.
+
+**Step 1 — Get the project.** Tell the agent: *"Clone the Terry repo into a new folder called
+`my-bot`."* Each clone is one independent strategy project. If you're already inside a Terry
+folder, you can skip this and just use it as-is.
+
+**Step 2 — Set up the environment.** Tell the agent: *"Set up and start Terry."* It creates the
+`.venv`, installs `requirements.txt`, and copies `.env.example` → `.env`. One-time per project
+folder.
+
+**Step 3 — Start the Terry server.** The agent runs `python -m terry serve`, which starts *both*
+the MCP server and the dashboard in one command and prints a separate URL for each:
+
+```
+  ✓ Terry Dashboard running at http://127.0.0.1:9020
+  ✓ Terry MCP Server running at http://localhost:9021/mcp
+```
+
+- The **MCP server** URL (`:9021/mcp`) is what your AI agent connects to.
+- The **dashboard** URL (`:9020`) is a local web page you open in a browser to watch things
+  visually.
+
+**Step 4 — Connect your agent to Terry.** Tell the agent: *"Connect yourself to the Terry MCP
+server."* (`claude mcp add --transport http terry http://localhost:9021/mcp`.) The agent now has
+58 new tools: import data, create strategies, run backtests, check metrics, etc.
+
+**Step 5 — Describe the strategy you want.** In plain English: *"Build a strategy that goes long
+on BTC/USDT when the 20-period EMA crosses above the 50-period EMA, with a 2% stop-loss and 4%
+take-profit."* The agent writes the strategy into `strategies/YourStrategyName/` — you never touch
+code.
+
+**Step 6 — Import historical data.** Tell the agent: *"Import 6 months of 1-minute BTC/USDT
+candles from Binance."* Free, no API key — pulled from Binance's public endpoint and stored
+locally in SQLite.
+
+**Step 7 — Run a backtest.** Tell the agent: *"Backtest that strategy on the data you just
+imported."* It replays the strategy candle-by-candle and returns 44 performance metrics: win rate,
+net profit, Sharpe ratio, max drawdown, etc.
+
+**Step 8 — Review the results.** Ask the agent to summarize the results in plain terms ("was this
+profitable? was it risky? how many trades?"), or open the dashboard at
+`http://127.0.0.1:9020` to see the equity curve and trade list visually.
+
+**Step 9 — Sanity-check it isn't luck (optional but recommended).** Ask the agent to run:
+- *"Rule significance test"* — is the strategy's edge statistically real or noise?
+- *"Monte Carlo simulation"* — does it hold up against randomized variations of the data/trade
+  order?
+- *"Optimize the parameters"* — tune settings (like EMA lengths) with out-of-sample validation to
+  avoid overfitting.
+
+**Step 10 — Iterate.** Give feedback in plain language ("it loses too much in downtrends, add a
+filter for that") and repeat steps 5–9 until you're happy.
+
+Terry only simulates on historical data — it never connects to a real exchange account or places
+live trades.
+
+---
+
 ## 1. The big picture (in plain words)
 
 Think of Terry as three things working together:
@@ -68,12 +129,24 @@ You should see all dependencies ticked and `Status: OK`.
 
 ## 3. Start Terry and connect your agent
 
-**Start the server** (leave it running in a terminal):
+**Start Terry** (leave it running in a terminal). A single `serve` command starts *both* the MCP
+server and the local dashboard, each on its own port and its own URL:
 
 ```bash
 .venv/bin/python -m terry serve
-# → ✓ Terry MCP Server running at http://localhost:9021/mcp
+#
+#   ✓ Terry Dashboard running at http://127.0.0.1:9020
+#   ✓ Terry MCP Server running at http://localhost:9021/mcp
+#
 ```
+
+- **MCP server** → `http://localhost:9021/mcp` — this is what your AI agent connects to.
+- **Dashboard** → `http://127.0.0.1:9020` — open this in a browser to watch things visually.
+
+Use `--port` to change the MCP port, `--dashboard-port` to change the dashboard port, and `--host`
+to change the dashboard's bind address (the MCP server always listens on all interfaces). If you
+only want one of the two, run `terry dashboard` or the MCP server module on its own instead of
+`serve`.
 
 **Connect Claude Code** to it (in another terminal):
 
