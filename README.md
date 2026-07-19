@@ -85,9 +85,12 @@ Then just ask your agent to import candles, build a strategy, and backtest it.
   ML training, backtest exports/charts/benchmarking, and Optuna optimization with out-of-sample
   validation. CPU controls drive bounded local workers for significance, Monte Carlo, and
   optimization.
-- **Research dashboard** — IDE-like strategy editor plus multi-route/data-route, pipeline,
-  optimization, export, robustness, editable/deletable titled sessions, notes, and source
-  snapshots, with guarded destructive actions and unsaved-change protection.
+- **Research dashboard** — IDE-like strategy editor and a Jesse-parity results view: interactive
+  candlestick charts with trade entry/exit markers and strategy indicator overlays (per-route
+  selector + RSI-style sub-charts), portfolio equity vs buy-and-hold, a month×year PnL heatmap,
+  drawdown/underwater and distribution charts, a Monte Carlo scenario fan chart, grouped 44-metric
+  tables, per-order trade detail, and an interactive routing menu for multi trading/data routes —
+  all rendered locally with a vendored, CSP-safe charting library (no external requests).
 - **58 MCP tools + 12 resources** — tools for strategy creation, data import, configuration,
   backtesting, and analysis.
 - **Free data + local storage** — 10 Jesse backtest exchanges through public REST + SQLite.

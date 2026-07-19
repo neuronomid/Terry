@@ -80,4 +80,8 @@ class CandleStore:
         """Close of the current 1m candle at the simulator clock."""
         base = self.raw_1m[jh.key(exchange, symbol)]
         idx = self.app.index_1m
+        # Defensive: if a secondary route/data feed is shorter than the base
+        # timeline, hold its last known price instead of indexing out of bounds.
+        if idx >= len(base):
+            idx = len(base) - 1
         return float(base[idx, 2])

@@ -177,6 +177,21 @@ class Runner:
                 warmup_candles[key] = {
                     "exchange": feed_exchange, "symbol": symbol, "candles": warmup,
                 }
+        # Keep every feed's 1m timeline the same length so the simulator's shared
+        # index stays aligned across routes (feeds list at different dates, so BTC
+        # may carry far more warm-up history than a newer symbol like ETH).
+        if len(candles) > 1:
+            min_trading = min(len(v["candles"]) for v in candles.values())
+            for v in candles.values():
+                v["candles"] = v["candles"][:min_trading]
+        if len(warmup_candles) > 1:
+            min_warmup = min(len(v["candles"]) for v in warmup_candles.values())
+            for v in warmup_candles.values():
+                v["candles"] = v["candles"][-min_warmup:]
+        # Warm-up must be present for every feed or none, otherwise injection shifts
+        # only some routes and desynchronises the shared timeline.
+        if warmup_candles and len(warmup_candles) != len(candles):
+            warmup_candles = {}
         # if we already have warmup candles, don't double-reserve inside the engine
         engine_config = dict(config)
         if warmup_candles:
@@ -210,17 +225,44 @@ class Runner:
                        strategies_dir=self.ctx.strategies_dir,
                        should_cancel=self._should_cancel(sid))
         self.ctx.sessions.set_progress(sid, 100)
+        daily_balance = res.get("daily_balance", []) or []
         output = {
             "metrics": res["metrics"],
             "num_trades": len(res["trades"]),
             "trades": res["trades"][:500],
             "equity_curve": res.get("equity_curve", [])[::max(1, len(res.get("equity_curve", [])) // 500 or 1)],
+            "daily_balance": daily_balance[::max(1, len(daily_balance) // 1000 or 1)],
+            "monthly_returns": _compute_monthly_returns(daily_balance, state.get("start_date")),
         }
         for key in ("csv", "json", "tradingview", "benchmark", "charts_session_id",
-                    "charts_folder", "logs"):
+                    "charts_folder", "logs", "chart_data"):
             if res.get(key) is not None:
                 output[key] = res[key]
+        if state.get("benchmark") and daily_balance:
+            curve = self._benchmark_curve(state, res["metrics"].get("starting_balance"))
+            if curve:
+                output["benchmark_curve"] = curve
         return output
+
+    def _benchmark_curve(self, state, starting_balance):
+        """Daily buy-and-hold equity for the primary route, for the equity-chart overlay."""
+        try:
+            routes = state.get("routes")
+            exchange = routes[0]["exchange"] if routes else state["exchange"]
+            symbol = routes[0]["symbol"] if routes else state["symbol"]
+            start_ts = jh.date_to_timestamp(state["start_date"])
+            finish_ts = jh.date_to_timestamp(state["finish_date"])
+            raw = self.ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
+            if len(raw) < 2:
+                return None
+            from ..engine.candle_store import aggregate_candles
+            daily = aggregate_candles(raw, "1D")
+            base = float(daily[0, 2]) or 1.0
+            balance = float(starting_balance or daily[0, 2])
+            return [{"time": int(c[0] / 1000), "value": balance * float(c[2]) / base}
+                    for c in daily]
+        except Exception:
+            return None
 
     def _run_significance(self, sid, state):
         config, routes, data_routes, candles, warmup = self._prepare(state)
@@ -308,6 +350,47 @@ class Runner:
             should_cancel=self._should_cancel(sid), **kwargs)
         self.ctx.sessions.set_progress(sid, 100)
         return res
+
+
+def _compute_monthly_returns(daily_balance, start_date):
+    """Monthly percentage returns grouped into a year x month grid (mirrors Jesse).
+
+    Returns ``{"years": [...], "rows": [{"year", "months": [12 values|None], "total"}]}``
+    where each monthly value is ``(last_balance / first_balance - 1) * 100`` for that
+    calendar month and ``total`` is the compounded annual return.
+    """
+    if not daily_balance or len(daily_balance) < 2 or not start_date:
+        return None
+    from datetime import timedelta
+    try:
+        anchor = jh.timestamp_to_arrow(jh.date_to_timestamp(start_date)).datetime
+    except Exception:
+        return None
+    buckets = {}
+    for offset, balance in enumerate(daily_balance):
+        day = anchor + timedelta(days=offset)
+        key = (day.year, day.month)
+        if key not in buckets:
+            buckets[key] = {"first": balance, "last": balance}
+        else:
+            buckets[key]["last"] = balance
+    monthly = {}
+    for key in sorted(buckets):
+        first, last = buckets[key]["first"], buckets[key]["last"]
+        monthly[key] = ((last / first - 1) * 100) if first else 0.0
+    years = sorted({year for year, _ in monthly})
+    rows = []
+    for year in years:
+        months = [monthly.get((year, month)) for month in range(1, 13)]
+        compound = 1.0
+        seen = False
+        for value in months:
+            if value is not None:
+                compound *= (1 + value / 100)
+                seen = True
+        rows.append({"year": year, "months": months,
+                     "total": (compound - 1) * 100 if seen else None})
+    return {"years": years, "rows": rows}
 
 
 def _compact_monte_carlo(result):

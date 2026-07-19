@@ -146,9 +146,18 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
     )
 
     trades = [t.to_dict() for t in store.closed_trades]
+    # Per-route indicator overlays captured while the strategy ran, keyed the same way
+    # the dashboard requests candles (exchange-symbol-timeframe).
+    chart_data = {}
+    for route in route_objs:
+        overlays = route.strategy._chart_overlays()
+        if overlays["candle_lines"] or overlays["candle_hlines"] or overlays["extra_charts"]:
+            chart_data[jh.key(route.exchange, route.symbol, route.timeframe)] = overlays
     result = {
         "metrics": metrics,
         "trades": trades,
+        "daily_balance": list(store.app.daily_balance),
+        "chart_data": chart_data or None,
         "logs": ([*sim.logs, *store.logs.info, *store.logs.errors]
                  if generate_logs else None),
         "ml_data": [point for route in route_objs

@@ -6,6 +6,7 @@ implemented here.
 """
 from __future__ import annotations
 
+import bisect
 import csv
 import io
 import math
@@ -47,6 +48,13 @@ _ENGINE_CONFIG_KEYS = {
 
 def _error(status: int, message: str, code: str = "invalid_request") -> HTTPException:
     return HTTPException(status_code=status, detail={"error": code, "message": message})
+
+
+def _short_qty(qty: Any) -> str:
+    try:
+        return f"{abs(float(qty)):g}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def _require_name(name: str) -> str:
@@ -223,6 +231,8 @@ def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
         # Dedicated MCP retrieval exposes downsampled Monte Carlo curves. Avoid
         # transferring every scenario on normal dashboard polling/history calls.
         result["results"].pop("equity_curves", None)
+        # Per-candle indicator overlays are served lazily by the candles endpoint.
+        result["results"].pop("chart_data", None)
     result["session_id"] = result.pop("id")
     result["dashboard_url"] = (result.get("results") or {}).get("dashboard_url", "")
     return result
@@ -794,6 +804,81 @@ def create_app(project_root: str | None = None) -> FastAPI:
             writer.writeheader()
             writer.writerows(trades)
         return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{session_id}-trades.csv"'})
+
+    @app.get("/api/session/{session_id}/candles")
+    def session_candles(session_id: str, route: int = 0, _: None = Depends(auth)):
+        """Serve OHLC candles + trade markers + indicator overlays for one route of a
+        finished backtest so the dashboard can draw Jesse's candlestick/positions chart."""
+        session = ctx.sessions.get(session_id)
+        if session is None:
+            raise _error(404, "Session was not found.", "not_found")
+        if session["kind"] != "backtest":
+            raise _error(422, "Candlestick charts are only available for backtests.")
+        state = session["state"]
+        routes = state.get("routes") or [{
+            "exchange": state["exchange"], "symbol": state["symbol"],
+            "timeframe": state["timeframe"], "strategy": state["strategy"]}]
+        if route < 0 or route >= len(routes):
+            raise _error(422, "route index is out of range.")
+        r = routes[route]
+        exchange, symbol, timeframe = r["exchange"], r["symbol"], r["timeframe"]
+        start_ts = jh.date_to_timestamp(state["start_date"])
+        finish_ts = jh.date_to_timestamp(state["finish_date"])
+        raw = ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
+        from ..engine.candle_store import aggregate_candles
+        agg = aggregate_candles(raw, timeframe)
+        step = max(1, len(agg) // 12000 or 1)  # keep the payload lightweight-charts-friendly
+        agg = agg[::step]
+        candles = [{"time": int(c[0] / 1000), "open": c[1], "high": c[3],
+                    "low": c[4], "close": c[2], "volume": c[5]} for c in agg]
+        candle_times = [c["time"] for c in candles]
+
+        def _snap(order_ms):
+            time = int(order_ms / 1000)
+            if not candle_times:
+                return time
+            idx = bisect.bisect_right(candle_times, time) - 1
+            return candle_times[max(0, idx)]
+
+        results = session.get("results") or {}
+        markers = []
+        for trade in results.get("trades") or []:
+            if trade.get("symbol") not in (None, symbol):
+                continue
+            for order in trade.get("orders") or []:
+                if not order.get("executed_at"):
+                    continue
+                buy = order.get("side") == "buy"
+                reduce_only = order.get("reduce_only")
+                markers.append({
+                    "time": _snap(order["executed_at"]),
+                    "position": "belowBar" if buy else "aboveBar",
+                    "color": "#4dd49b" if buy else "#ff6b6b",
+                    "shape": "arrowUp" if buy else "arrowDown",
+                    "text": f"{'Close' if reduce_only else 'Buy' if buy else 'Sell'} "
+                            f"{_short_qty(order.get('qty'))}",
+                })
+        markers.sort(key=lambda m: m["time"])
+        overlays = (results.get("chart_data") or {}).get(jh.key(exchange, symbol, timeframe))
+        return {
+            "route": {"exchange": exchange, "symbol": symbol, "timeframe": timeframe,
+                      "strategy": r.get("strategy")},
+            "routes": [{"exchange": rr["exchange"], "symbol": rr["symbol"],
+                        "timeframe": rr["timeframe"], "strategy": rr.get("strategy")}
+                       for rr in routes],
+            "candles": candles, "markers": markers,
+            "overlays": _clean_json(overlays) if overlays else None,
+        }
+
+    @app.get("/api/session/{session_id}/monte-carlo-curves")
+    def session_mc_curves(session_id: str, _: None = Depends(auth)):
+        """Serve per-scenario equity curves for the Monte Carlo fan chart."""
+        session = ctx.sessions.get(session_id)
+        if session is None:
+            raise _error(404, "Session was not found.", "not_found")
+        curves = (session.get("results") or {}).get("equity_curves") or {}
+        return {"candles": _clean_json(curves.get("candles")),
+                "trades": _clean_json(curves.get("trades"))}
 
     @app.get("/api/live")
     def live_unavailable(_: None = Depends(auth)):

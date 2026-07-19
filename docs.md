@@ -243,6 +243,19 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
+- 0.3.0 — Full Jesse-parity dashboard visualizations. Backtest results now open in a tabbed report:
+  Overview (grouped 44-metric tables + interactive equity curve with buy-and-hold benchmark),
+  Price & Trades (TradingView Lightweight-Charts candlesticks with entry/exit markers, per-strategy
+  indicator overlays via `add_line_to_candle_chart`/`add_extra_line_chart`, volume, a per-route
+  selector, and synced sub-charts), Monthly & Risk (year×month PnL heatmap, underwater/drawdown,
+  trade-PnL and monthly-return distributions), Trades (expandable per-order detail) and Details
+  (hyperparameters/config/logs). Monte Carlo sessions render a scenario fan chart plus the
+  worst/median/best distribution table. Research forms gained an interactive routing menu (multi
+  trading/data routes). New dashboard endpoints: `GET /api/session/{id}/candles` (OHLC + markers +
+  overlays per route) and `GET /api/session/{id}/monte-carlo-curves`; backtest results now include
+  `daily_balance`, `monthly_returns`, `benchmark_curve`, and per-route `chart_data`. Fixed a
+  multi-route engine crash from unequal warm-up history (feeds are now length-aligned). Lightweight
+  Charts is vendored locally under `dashboard/static/vendor` (CSP-safe, no external requests).
 - 0.2.3 — Jesse lifecycle/order/accounting parity: zero-based strategy index, termination hooks,
   isolated liquidation, futures/spot balance validation, tiered exit preservation, order sorting,
   trade metadata, the complete public helper surface, capitalized model/store/logger imports, and

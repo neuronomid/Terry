@@ -77,7 +77,11 @@ class Strategy(ABC):
         self._take_profit = None
 
         self._cache = {}
-        self._chart_lines = []
+        # Timestamped chart overlays captured during the backtest so the dashboard
+        # can redraw the strategy's indicators on the candlestick chart.
+        self._candle_lines = {}    # title -> {"color": str|None, "data": [{time, value}]}
+        self._candle_hlines = {}   # title -> {"value", "color", "line_width", "line_style"}
+        self._extra_charts = {}    # chart_name -> {"lines": {...}, "hlines": {...}}
         self._current_route_index = None
         self._evaluating_filters = False
 
@@ -782,26 +786,54 @@ class Strategy(ABC):
             raise ValueError(
                 f'log_type should be either "info" or "error". You passed {log_type}')
 
+    def _chart_time(self):
+        """Current candle time in seconds (lightweight-charts uses UTC seconds)."""
+        try:
+            return int(self.current_candle[0] / 1000)
+        except Exception:
+            return None
+
+    def _record_line(self, container, title, value, color):
+        entry = container.setdefault(str(title), {"color": color, "data": []})
+        if color is not None:
+            entry["color"] = color
+        time = self._chart_time()
+        if time is not None:
+            entry["data"].append({"time": time, "value": float(value)})
+
     def add_line_to_candle_chart(self, title, value, color=None):
         self._validate_chart_value(value)
-        self._chart_lines.append(("candle_line", title, value, color))
+        self._record_line(self._candle_lines, title, value, color)
 
     def add_horizontal_line_to_candle_chart(self, title, value, color=None,
                                             line_width=1.5, line_style="solid"):
         self._validate_chart_value(value)
         self._validate_line_style(line_style)
-        self._chart_lines.append(("candle_hline", title, value, color, line_width, line_style))
+        self._candle_hlines[str(title)] = {
+            "value": float(value), "color": color,
+            "line_width": line_width, "line_style": line_style}
 
     def add_extra_line_chart(self, chart_name, title, value, color=None):
         self._validate_chart_value(value)
-        self._chart_lines.append(("extra_line", chart_name, title, value, color))
+        chart = self._extra_charts.setdefault(str(chart_name), {"lines": {}, "hlines": {}})
+        self._record_line(chart["lines"], title, value, color)
 
     def add_horizontal_line_to_extra_chart(self, chart_name, title, value, color=None,
                                            line_width=1.5, line_style="solid"):
         self._validate_chart_value(value)
         self._validate_line_style(line_style)
-        self._chart_lines.append(("extra_hline", chart_name, title, value, color,
-                                  line_width, line_style))
+        chart = self._extra_charts.setdefault(str(chart_name), {"lines": {}, "hlines": {}})
+        chart["hlines"][str(title)] = {
+            "value": float(value), "color": color,
+            "line_width": line_width, "line_style": line_style}
+
+    def _chart_overlays(self):
+        """Return this strategy's captured chart overlays for the dashboard."""
+        return {
+            "candle_lines": self._candle_lines,
+            "candle_hlines": self._candle_hlines,
+            "extra_charts": self._extra_charts,
+        }
 
     @staticmethod
     def _validate_chart_value(value):
