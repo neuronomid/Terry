@@ -8,18 +8,21 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# terry local data (candles, sessions, reports, config)
+# terry local data (candles, sessions, reports, charts, config)
 storage/*.db
 storage/*.db-wal
 storage/*.db-shm
-storage/reports/
+storage/reports/*
+storage/backtest-charts/
 storage/config.json
 !storage/.gitkeep
-!storage/reports/
 !storage/reports/.gitkeep
 
 # user strategies are yours to keep; comment out the next line to version them
 # strategies/
+
+# browser-automation scratch (playwright-cli sessions/snapshots)
+.playwright-cli/
 
 # os
 .DS_Store
