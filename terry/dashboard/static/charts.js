@@ -166,8 +166,10 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
   } else {
     ts.fitContent();
   }
-  return {
-    chart,
+  // Preserve the established helper contract (the returned value is the native chart)
+  // while adding the live-price controller methods used by Demo Mode. This keeps old and
+  // new app.js versions interoperable if a browser ever has mixed static assets in memory.
+  return Object.assign(chart, {
     updateCandle(candle) {
       if (!candle || !Number.isFinite(Number(candle.time))) return;
       const next = { time: candle.time, open: candle.open, high: candle.high,
@@ -195,7 +197,7 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
     setTradeLinesVisible(visible) {
       tradeLineSeries.forEach(item => item.series.applyOptions({ visible }));
     },
-  };
+  });
 }
 
 function syncTimeScales(a, b) {

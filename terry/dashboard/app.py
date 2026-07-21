@@ -673,8 +673,10 @@ def create_app(project_root: str | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
+        # The dashboard is a local application whose ES modules must always come from the
+        # same build. Caching app.js beside an older charts.js can break their shared runtime
+        # contract, so keep every dashboard/API response out of browser and proxy caches.
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.exception_handler(HTTPException)

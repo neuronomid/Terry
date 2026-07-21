@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import time
 import asyncio
+import shutil
+import subprocess
 import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from terry import helpers as jh
@@ -62,8 +65,13 @@ def test_dashboard_serves_navigation_and_strategy_crud(tmp_path: Path):
     page = client.get("/")
     assert page.status_code == 200
     assert "Terry" in page.text
-    assert client.get("/app.js").status_code == 200
-    assert list(client.get("/api/status").json()["sessions"]) == [
+    for asset in ("/", "/app.js", "/charts.js", "/styles.css"):
+        response = client.get(asset)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+    status = client.get("/api/status")
+    assert status.headers["cache-control"] == "no-store"
+    assert list(status.json()["sessions"]) == [
         "backtest", "demo", "optimization", "monte_carlo", "significance_test",
     ]
 
@@ -308,11 +316,60 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert ".pill.finished" in styles
     assert ".line-numbers" in styles and ".route-builder" in styles
     # Live candle mutation + non-destructive trade connectors + modern trade sorting.
-    assert "activePriceChart?.updateCandle(live.candle)" in source
+    assert "activePriceChart?.updateCandle?.(live.candle)" in source
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
+
+
+def test_price_chart_preserves_native_chart_and_exposes_live_controller_methods():
+    """Exercise the actual browser-module return contract with a lightweight chart stub."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the dashboard module contract test")
+    script = r"""
+import fs from 'node:fs';
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const charts = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const makeSeries = () => ({
+  setData() {}, update() {}, setMarkers() {}, createPriceLine() {}, applyOptions() {},
+});
+const timeScale = {
+  fitContent() {}, setVisibleLogicalRange() {}, subscribeVisibleLogicalRangeChange() {},
+};
+const nativeChart = {
+  addCandlestickSeries: makeSeries,
+  addHistogramSeries: makeSeries,
+  addLineSeries: makeSeries,
+  priceScale() { return { applyOptions() {} }; },
+  timeScale() { return timeScale; },
+  removeSeries() {}, remove() {},
+};
+globalThis.window = { LightweightCharts: {
+  LineStyle: { Dashed: 2, Dotted: 1 },
+  createChart() { return nativeChart; },
+} };
+globalThis.document = { body: { classList: { contains() { return false; } } } };
+const controller = charts.priceChart(
+  { innerHTML: '', clientHeight: 460 },
+  { candles: [{ time: 1, open: 10, high: 12, low: 9, close: 11, volume: 5 }] },
+);
+if (controller !== nativeChart) throw new Error('priceChart no longer returns the native chart');
+for (const method of ['updateCandle', 'setMarkers', 'setTradeLines', 'setTradeLinesVisible']) {
+  if (typeof controller[method] !== 'function') throw new Error(`missing ${method}`);
+}
+controller.updateCandle({ time: 2, open: 11, high: 13, low: 10, close: 12, volume: 6 });
+controller.setMarkers([]);
+controller.setTradeLines([], false);
+controller.setTradeLinesVisible(false);
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "-e", script,
+         str(Path("terry/dashboard/static/charts.js").resolve())],
+        check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_live_candle_refresh_updates_the_forming_row(tmp_path: Path, monkeypatch):
