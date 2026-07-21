@@ -229,9 +229,10 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "Trading routes" in source and "Data routes" in source
     assert "JSON.parse(pipelineRaw)" in source
     assert "Candle Pipeline" in source and "pipeline_params_json" in source
-    # Demo Mode + strategy import/export + table-header alignment
+    # Live Demo Mode + strategy import/export + table-header alignment
     assert "function demoForm()" in source and "paperAccountPanel" in source
-    assert "Starting Paper Balance" in source and "add-transfer" in source
+    assert "Starting Paper Balance" in source and "History Lookback" in source
+    assert "Start Live Demo" in source and "liveConnectingBlock" in source
     assert "function importStrategy" in source and "/api/strategies/import" in source
     assert "/export" in source and 'id="import-strategy"' in source
     assert ".trades-table th.num" in styles and ".mc-summary th" in styles

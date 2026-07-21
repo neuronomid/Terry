@@ -462,36 +462,6 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-def _validate_transfers(value: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Validate demo paper-money transfers: deposits/withdrawals of paper cash, each an
-    optional date inside the run window."""
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise _error(422, "transfers must be a JSON array.")
-    if len(value) > 100:
-        raise _error(422, "A demo can have at most 100 paper-money transfers.")
-    start, finish = state["start_date"], state.get("finish_date")
-    out = []
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            raise _error(422, f"transfers[{index}] must be an object.")
-        unknown = set(item) - {"type", "amount", "date"}
-        if unknown:
-            raise _error(422, f"Unknown transfers[{index}] field(s): {', '.join(sorted(unknown))}.")
-        if item.get("type") not in ("deposit", "withdraw"):
-            raise _error(422, f"transfers[{index}].type must be 'deposit' or 'withdraw'.")
-        entry = {"type": item["type"],
-                 "amount": _number(item.get("amount"), f"transfers[{index}].amount", exclusive=True)}
-        if item.get("date"):
-            date = _date(item["date"], f"transfers[{index}].date")
-            if date < start or (finish and date > finish):
-                raise _error(422, f"transfers[{index}].date must fall inside the demo window.")
-            entry["date"] = date
-        out.append(entry)
-    return out
-
-
 def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if kind not in VALID_KINDS:
         raise _error(404, "Unknown research mode.", "unknown_mode")
@@ -508,7 +478,7 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         "backtest": {"debug_mode", "export_csv", "export_json", "export_chart",
                      "export_tradingview", "fast_mode", "benchmark"},
         "demo": {"debug_mode", "export_csv", "export_json", "export_chart",
-                 "export_tradingview", "fast_mode", "benchmark", "transfers"},
+                 "export_tradingview", "fast_mode", "benchmark", "lookback_days"},
     }[kind]
     unknown = set(payload) - allowed
     if unknown:
@@ -522,6 +492,16 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
     notes = payload.get("description") or payload.get("notes") or ""
     if len(notes) > 20_000:
         raise _error(422, "notes cannot exceed 20,000 characters.")
+    if kind == "demo":
+        # A live demo trades a rolling [now - lookback, now] window; synthesize the
+        # initial date range so the shared validation/state plumbing still applies.
+        lookback = _integer(payload.get("lookback_days", 14), "lookback_days", 1)
+        if lookback > 365:
+            raise _error(422, "lookback_days cannot exceed 365.")
+        now = jh.today_to_timestamp()
+        payload = {**payload,
+                   "start_date": jh.timestamp_to_date(now - lookback * 86_400_000),
+                   "finish_date": jh.timestamp_to_date(now)}
     state = _base_state(ctx, payload)
     if kind == "significance_test" and len(state.get("routes") or [state]) != 1:
         raise _error(422, "Rule significance testing requires exactly one trading route.")
@@ -589,7 +569,7 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         }.items():
             state[field] = _boolean(payload.get(field, default), field)
         if kind == "demo":
-            state["transfers"] = _validate_transfers(payload.get("transfers"), state)
+            state["lookback_days"] = _integer(payload.get("lookback_days", 14), "lookback_days", 1)
     start = _boolean(payload.get("start", True), "start")
     metadata = _session_notes_metadata(ctx, kind, state, title or None, notes or None)
     sid = ctx.sessions.create(
@@ -1011,7 +991,9 @@ def create_app(project_root: str | None = None) -> FastAPI:
         r = routes[route]
         exchange, symbol, timeframe = r["exchange"], r["symbol"], r["timeframe"]
         start_ts = jh.date_to_timestamp(state["start_date"])
-        finish_ts = jh.date_to_timestamp(state["finish_date"])
+        # A live demo's window advances to the present, so chart up to "now".
+        finish_ts = (jh.now_to_timestamp(force_fresh=True) if session["kind"] == "demo"
+                     else jh.date_to_timestamp(state["finish_date"]))
         raw = ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
         from ..engine.candle_store import aggregate_candles
         agg = aggregate_candles(raw, timeframe)

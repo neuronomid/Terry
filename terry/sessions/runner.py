@@ -84,10 +84,13 @@ class Runner:
         kind = session["kind"]
         state = session["state"]
         try:
+            if kind == "demo":
+                # Live paper trading manages its own status (stays "running" and
+                # streams updated results until stopped), so it returns here.
+                self._run_demo_live(sid, state)
+                return
             if kind == "backtest":
                 results = self._run_backtest(sid, state)
-            elif kind == "demo":
-                results = self._run_demo(sid, state)
             elif kind == "significance_test":
                 results = self._run_significance(sid, state)
             elif kind == "monte_carlo":
@@ -246,22 +249,92 @@ class Runner:
                 output["benchmark_curve"] = curve
         return output
 
-    def _run_demo(self, sid, state):
-        """Paper-trading demo: a backtest funded by a paper account (with optional
-        deposits/withdrawals) that produces the full backtest report."""
-        config, routes, data_routes, candles, warmup = self._prepare(state)
-        cashflows = _build_cashflows(state)
+    # ------------------------------------------------------------------ live demo
+    def _run_demo_live(self, sid, state):
+        """Live paper trading: fetch fresh market candles, replay the strategy over a
+        rolling [now - lookback, now] window with paper money, and stream the full
+        backtest report. Loops until the user stops it. Because the engine is
+        deterministic and look-ahead free, replaying the window each tick is
+        equivalent to trading each new candle as it closes."""
+        import time as _time
+        exchange = state["exchange"]
+        symbol = state["symbol"]
+        timeframe = state["timeframe"]
+        lookback_days = int(state.get("lookback_days", 14))
+        config = self.ctx.config.engine_config(state.get("config"))
+        warm = int(config.get("warm_up_candles", 0) or 0)
+        warmup_ms = warm * jh.timeframe_to_one_minutes(timeframe) * 60_000
+        poll_seconds = int(state.get("poll_seconds", 20))
+        produced = False
+        while sid not in self._canceled:
+            try:
+                now_ts = jh.now_to_timestamp(force_fresh=True)
+                start_ts = now_ts - lookback_days * 86_400_000
+                self._refresh_live_candles(exchange, symbol, start_ts - warmup_ms, now_ts, sid)
+                if sid in self._canceled:
+                    break
+                output = self._demo_backtest_window(sid, state, start_ts, now_ts)
+                output["live"] = {
+                    "is_live": True, "updated_at": now_ts, "poll_seconds": poll_seconds,
+                    "lookback_days": lookback_days,
+                    "window_start": jh.timestamp_to_date(start_ts),
+                    "window_end": jh.timestamp_to_date(now_ts),
+                }
+                self.ctx.sessions.set_results(sid, output, status="running")
+                produced = True
+            except InterruptedError:
+                break
+            except Exception as exc:  # keep the live session alive across transient errors
+                message = f"{type(exc).__name__}: {exc}"
+                if not produced:
+                    self.ctx.sessions.set_results(
+                        sid, {"error": "live_error", "message": message,
+                              "live": {"is_live": True, "error": message}}, status="running")
+            for _ in range(max(1, poll_seconds)):
+                if sid in self._canceled:
+                    break
+                _time.sleep(1)
+        self._finalize_demo(sid, state)
+
+    def _finalize_demo(self, sid, state):
+        session = self.ctx.sessions.get(sid)
+        final = dict((session or {}).get("results") or {})
+        if isinstance(final.get("live"), dict):
+            final["live"] = {**final["live"], "is_live": False,
+                             "stopped_at": jh.now_to_timestamp(force_fresh=True)}
+        if final.get("metrics"):
+            try:
+                final["dashboard_url"] = self.ctx.write_report(sid, "demo", state, final)
+            except Exception:
+                pass
+        self.ctx.sessions.set_results(sid, final, status="finished")
+
+    def _refresh_live_candles(self, exchange, symbol, start_ts, finish_ts, sid):
+        """Ensure the local store holds 1m candles up to `finish_ts`, fetching only the
+        gap since the newest stored candle in the window."""
+        from ..data.binance import fetch_1m_range
+        existing = self.ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
+        fetch_from = start_ts
+        if len(existing):
+            fetch_from = max(start_ts, int(existing[-1][0]) + 60_000)
+        if fetch_from >= finish_ts:
+            return
+        chunk = fetch_1m_range(exchange, symbol, fetch_from, finish_ts,
+                               should_stop=lambda: sid in self._canceled)
+        if len(chunk):
+            self.ctx.candle_db.store(exchange, symbol, chunk)
+
+    def _demo_backtest_window(self, sid, state, start_ts, finish_ts):
+        start_date = jh.timestamp_to_date(start_ts)
+        finish_date = jh.timestamp_to_date(finish_ts)
+        config, routes, data_routes, candles, warmup = self._prepare(
+            state, start_date, finish_date)
         res = backtest(config, routes, data_routes, candles, warmup_candles=warmup,
-                       generate_equity_curve=True,
-                       generate_charts=state.get("export_chart", True),
-                       charts_output_root=f"{self.ctx.storage_dir}/backtest-charts",
-                       benchmark=state.get("benchmark", True),
+                       generate_equity_curve=True, benchmark=state.get("benchmark", True),
                        fast_mode=state.get("fast_mode", True),
                        hyperparameters=state.get("hyperparameters"),
                        strategies_dir=self.ctx.strategies_dir,
-                       cashflows=cashflows,
                        should_cancel=self._should_cancel(sid))
-        self.ctx.sessions.set_progress(sid, 100)
         daily_balance = res.get("daily_balance", []) or []
         equity = res.get("equity_curve", []) or []
         output = {
@@ -270,14 +343,15 @@ class Runner:
             "trades": res["trades"][:500],
             "equity_curve": equity[::max(1, len(equity) // 500 or 1)],
             "daily_balance": daily_balance[::max(1, len(daily_balance) // 1000 or 1)],
-            "monthly_returns": _compute_monthly_returns(daily_balance, state.get("start_date")),
+            "monthly_returns": _compute_monthly_returns(daily_balance, start_date),
             "paper_account": _paper_account_summary(state, config, res["metrics"]),
         }
-        for key in ("charts_session_id", "charts_folder", "chart_data"):
-            if res.get(key) is not None:
-                output[key] = res[key]
+        if res.get("chart_data") is not None:
+            output["chart_data"] = res["chart_data"]
         if daily_balance:
-            curve = self._benchmark_curve(state, output["paper_account"]["net_funded"])
+            curve = self._benchmark_curve(
+                {**state, "start_date": start_date, "finish_date": finish_date},
+                res["metrics"].get("starting_balance"))
             if curve:
                 output["benchmark_curve"] = curve
         return output
@@ -390,25 +464,8 @@ class Runner:
         return res
 
 
-def _build_cashflows(state):
-    """Translate demo paper-money transfers into engine cashflows, applied by date.
-    Undated transfers fund the account at the start; returns None when there are none."""
-    transfers = state.get("transfers") or []
-    start_ts = jh.date_to_timestamp(state["start_date"])
-    out = []
-    for transfer in transfers:
-        amount = float(transfer.get("amount") or 0)
-        if amount <= 0:
-            continue
-        signed = amount if transfer.get("type") == "deposit" else -amount
-        date = transfer.get("date")
-        ts = jh.date_to_timestamp(date) if date else start_ts
-        out.append({"timestamp": max(ts, start_ts), "amount": signed})
-    return out or None
-
-
 def _paper_account_summary(state, config, metrics):
-    """Paper-account P&L that excludes deposits/withdrawals from trading profit."""
+    """Paper-account P&L that excludes any deposits/withdrawals from trading profit."""
     transfers = state.get("transfers") or []
     deposits = sum(float(t.get("amount") or 0) for t in transfers if t.get("type") == "deposit")
     withdrawals = sum(float(t.get("amount") or 0) for t in transfers if t.get("type") == "withdraw")
