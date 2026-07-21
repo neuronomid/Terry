@@ -6,6 +6,9 @@ const state = { status: null, strategy: null, session: null, importId: null, dir
 // Any navigation, session switch, or new run bumps the token, retiring stale loops
 // that would otherwise keep overwriting #active-session or #import-progress.
 let watchGen = 0, importGen = 0, lastDemoUpdate = null;
+// Saved viewport of a live demo's price chart, so real-time refreshes keep the user's
+// zoom/scroll (and follow the newest candle) instead of snapping to the whole history.
+let liveChartView = null;
 const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const numberFormats = new Map();
 const dateTimeFormat = new Intl.DateTimeFormat(undefined, { dateStyle:'medium', timeStyle:'short' });
@@ -105,11 +108,13 @@ async function strategies() {
   const data = await api('/api/strategies'); const selected = state.strategy || data.strategies[0]?.name;
   let editor = empty('Select a strategy', 'Create or select a strategy from the list.', '<button class="primary" id="new-strategy">New strategy</button>');
   if (selected) { try { const item = await api(`/api/strategies/${encodeURIComponent(selected)}`); state.strategy = selected; editor = `<div class="editor-head"><div><h2>${esc(selected)}</h2><p>${item.validation_error ? `<span class="validation error-text">⚠ ${esc(item.validation_error)}</span>` : '<span class="validation">● Imports successfully</span>'}</p></div><div class="button-row"><a class="secondary" id="export" href="/api/strategies/${encodeURIComponent(selected)}/export" download>Export</a><button class="secondary" id="fork">Fork</button><button class="danger-text" id="delete">Delete</button><button class="primary" id="save">Save</button></div></div><div class="code-shell"><pre class="line-numbers" id="line-numbers" aria-hidden="true"></pre><textarea class="code-editor" spellcheck="false" autocapitalize="off" autocomplete="off" id="strategy-code" aria-label="Strategy source code">${esc(item.content)}</textarea></div><div class="editor-status"><span id="cursor-position">Ln 1, Col 1</span><span>Python · Spaces: 4 · Ctrl/⌘+S to save</span></div>`; } catch (_) { state.strategy = null; } }
-  shell('Strategies', `<div class="split strategy-layout"><aside class="list-panel"><div class="panel-head"><strong>Strategies</strong><div class="button-row"><button class="icon-button" id="import-strategy" aria-label="Import strategy" title="Import a strategy bundle (.zip)">⇪</button><button class="icon-button" id="new-strategy" aria-label="New strategy" title="New strategy">＋</button></div></div><input type="file" id="import-file" accept=".zip,application/zip" hidden><input id="strategy-search" name="strategy_search" autocomplete="off" aria-label="Search strategies" placeholder="Search strategies…"><div class="strategy-list">${data.strategies.length ? data.strategies.map(item => `<button class="strategy-item ${item.name === selected ? 'selected' : ''}" data-name="${esc(item.name)}"><span aria-hidden="true">⌘</span><span>${esc(item.name)}${item.validation_error ? '<em title="Needs attention" aria-label="Needs attention">●</em>' : ''}</span></button>`).join('') : '<p class="muted">No strategies yet.</p>'}</div></aside><section class="workspace">${editor}</section></div>`, 'Write Python strategies, then use them in any research mode.');
+  shell('Strategies', `<div class="split strategy-layout"><aside class="list-panel"><div class="panel-head"><strong>Strategies</strong><div class="button-row"><button class="icon-button" id="import-strategy" aria-label="Import strategy bundle" title="Import a strategy bundle (.zip)">⇪</button><button class="icon-button" id="import-folder" aria-label="Import strategy folder" title="Import a strategy folder">🗀</button><button class="icon-button" id="new-strategy" aria-label="New strategy" title="New strategy">＋</button></div></div><input type="file" id="import-file" accept=".zip,application/zip,.terry-strategy.zip" hidden><input type="file" id="import-folder-file" webkitdirectory directory multiple hidden><input id="strategy-search" name="strategy_search" autocomplete="off" aria-label="Search strategies" placeholder="Search strategies…"><div class="strategy-list">${data.strategies.length ? data.strategies.map(item => `<button class="strategy-item ${item.name === selected ? 'selected' : ''}" data-name="${esc(item.name)}"><span aria-hidden="true">⌘</span><span>${esc(item.name)}${item.validation_error ? '<em title="Needs attention" aria-label="Needs attention">●</em>' : ''}</span></button>`).join('') : '<p class="muted">No strategies yet.</p>'}</div></aside><section class="workspace">${editor}</section></div>`, 'Write Python strategies, then use them in any research mode.');
   document.querySelectorAll('.strategy-item').forEach(button => button.addEventListener('click', () => { if (!confirmDiscard()) return; state.strategy = button.dataset.name; render(); }));
   document.querySelectorAll('#new-strategy').forEach(button => button.addEventListener('click', createStrategy));
   document.querySelector('#import-strategy')?.addEventListener('click', () => { if (!confirmDiscard()) return; document.querySelector('#import-file')?.click(); });
-  document.querySelector('#import-file')?.addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) importStrategy(file); });
+  document.querySelector('#import-file')?.addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) importStrategyZip(file); });
+  document.querySelector('#import-folder')?.addEventListener('click', () => { if (!confirmDiscard()) return; document.querySelector('#import-folder-file')?.click(); });
+  document.querySelector('#import-folder-file')?.addEventListener('change', event => { const files = [...event.target.files]; event.target.value = ''; if (files.length) importStrategyFolder(files); });
   document.querySelector('#strategy-search')?.addEventListener('input', event => { const query=event.target.value.trim().toLowerCase(); document.querySelectorAll('.strategy-item').forEach(item => { item.hidden=!item.dataset.name.toLowerCase().includes(query); }); });
   bindCodeEditor();
   document.querySelector('#save')?.addEventListener('click', async event => { const button=event.currentTarget; busy(button, true); try { const result = await api(`/api/strategies/${encodeURIComponent(state.strategy)}`, { method:'PUT', body: JSON.stringify({content: document.querySelector('#strategy-code').value}) }); state.dirty=false; state.dirtyReason=null; notice(result.validation_error ? 'Saved; resolve the validation warning before running.' : 'Strategy saved'); await render(); } catch (error) { notice(error.message, 'error'); busy(button, false); } });
@@ -117,24 +122,49 @@ async function strategies() {
   document.querySelector('#fork')?.addEventListener('click', async () => { if (!confirmDiscard()) return; const name = prompt('New strategy name'); if (!name) return; try { const result = await api(`/api/strategies/${encodeURIComponent(state.strategy)}/fork`, {method:'POST', body: JSON.stringify({name})}); state.strategy = result.name; notice('Strategy forked'); render(); } catch (error) { notice(error.message, 'error'); } });
 }
 async function createStrategy() { if (!confirmDiscard()) return; const name = prompt('Strategy class name (for example EmaCross)'); if (!name) return; try { await api('/api/strategies', {method:'POST', body: JSON.stringify({name})}); state.strategy = name; notice('Strategy created'); render(); } catch (error) { notice(error.message, 'error'); } }
-async function importStrategy(file) {
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = ''; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
+// Post an import payload, transparently handling the 409 name-conflict prompt (rename or overwrite).
+async function postImport(payload) {
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let binary = ''; const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    const data = btoa(binary);
     let result;
-    try { result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify({ data }) }); }
+    try { result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify(payload) }); }
     catch (error) {
       if (error.status !== 409) throw error;
       const choice = prompt('A strategy with that name already exists.\nEnter a different name to import as a copy, or leave blank to overwrite it:');
       if (choice === null) return;
-      const body = choice.trim() ? { data, name: choice.trim() } : { data, overwrite: true };
-      result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify(body) });
+      const retry = choice.trim() ? { ...payload, name: choice.trim() } : { ...payload, overwrite: true };
+      result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify(retry) });
     }
     state.strategy = result.name;
     notice(result.validation_error ? `Imported ${result.name}; resolve its validation warning before running.` : `Imported ${result.name}`);
     render();
+  } catch (error) { notice(error.message, 'error'); }
+}
+
+async function importStrategyZip(file) {
+  try { await postImport({ data: await fileToBase64(file) }); }
+  catch (error) { notice(error.message, 'error'); }
+}
+
+async function importStrategyFolder(fileList) {
+  try {
+    // Skip caches / OS junk up front so a big folder doesn't blow the file cap.
+    const picked = fileList.filter(f => {
+      const rel = f.webkitRelativePath || f.name;
+      return !/(^|\/)(__pycache__|\.DS_Store|Thumbs\.db)(\/|$)/.test(rel) && !/\.(pyc|pyo)$/.test(rel);
+    });
+    if (!picked.length) { notice('That folder has no strategy files.', 'error'); return; }
+    if (picked.length > 400) { notice('That folder has too many files to import.', 'error'); return; }
+    const files = await Promise.all(picked.map(async f => ({
+      path: f.webkitRelativePath || f.name, data: await fileToBase64(f),
+    })));
+    await postImport({ files });
   } catch (error) { notice(error.message, 'error'); }
 }
 
@@ -257,11 +287,11 @@ function renderSession(s){const result=s.results||{};const progress=Math.max(0,M
 // ── mount lightweight-charts once a finished session's HTML is in the DOM ──
 function mountSessionCharts(container,s){if(!container||!s)return;const showReport=s.status==='finished'||(s.kind==='demo'&&s.status==='running'&&(s.results||{}).metrics);if(!showReport)return;const tabs=[...container.querySelectorAll('.result-tabs [data-tab]')];const panels=[...container.querySelectorAll('[data-panel]')];const mounted=new Set();const mountTab=name=>{if(name==='overview'){const eq=container.querySelector('#eq-chart');if(eq){const series=[{name:'Portfolio',data:toSeconds(s.results.equity_curve)}];if(s.results.benchmark_curve)series.push({name:'Buy & Hold',data:toSeconds(s.results.benchmark_curve)});charts.lineChart(eq,series,{area:true,height:320});}}else if(name==='chart'){loadPriceChart(container,s);}else if(name==='returns'){const uw=container.querySelector('#uw-chart');if(uw)charts.areaChart(uw,underwaterSeries(s.results.daily_balance,s.state.start_date),{height:200});}};const activate=name=>{tabs.forEach(t=>t.classList.toggle('active',t.dataset.tab===name));panels.forEach(p=>{const on=p.dataset.panel===name;p.classList.toggle('active',on);p.hidden=!on;});if(!mounted.has(name)){mounted.add(name);mountTab(name);}};tabs.forEach(t=>t.addEventListener('click',()=>activate(t.dataset.tab)));const def=panels.find(p=>p.classList.contains('active'));if(def){mounted.add(def.dataset.panel);mountTab(def.dataset.panel);}
   container.querySelectorAll('.trade-row').forEach(row=>row.addEventListener('click',()=>{const d=container.querySelector(`[data-detail="${row.dataset.trade}"]`);if(d)d.hidden=!d.hidden;}));
-  const rs=container.querySelector('#route-select');if(rs)rs.addEventListener('change',()=>{state.chartRoute=Number(rs.value)||0;loadPriceChart(container,s);});
+  const rs=container.querySelector('#route-select');if(rs)rs.addEventListener('change',()=>{state.chartRoute=Number(rs.value)||0;liveChartView=null;loadPriceChart(container,s);});
   if(s.kind==='monte_carlo'){loadMcChart(container,s,'candles');const ms=container.querySelector('#mc-mode');if(ms)ms.addEventListener('change',()=>loadMcChart(container,s,ms.value));}}
-async function loadPriceChart(container,s){const price=container.querySelector('#price-chart');const extra=container.querySelector('#extra-charts');if(!price)return;price.innerHTML='<div class="chart-loading">Loading candles…</div>';try{const data=await api(`/api/session/${s.session_id}/candles?route=${state.chartRoute||0}`);if(!data.candles||!data.candles.length){price.innerHTML='<p class="muted padded">No candle data stored for this route. Re-import candles for this range.</p>';return;}charts.priceChart(price,data,{extraEl:extra});}catch(error){price.innerHTML=`<p class="muted padded">${esc(error.message)}</p>`;}}
+async function loadPriceChart(container,s){const price=container.querySelector('#price-chart');const extra=container.querySelector('#extra-charts');if(!price)return;const live=s.kind==='demo'&&!!(s.results||{}).live?.is_live;price.innerHTML='<div class="chart-loading">Loading candles…</div>';try{const data=await api(`/api/session/${s.session_id}/candles?route=${state.chartRoute||0}`);if(!data.candles||!data.candles.length){price.innerHTML='<p class="muted padded">No candle data stored for this route. Re-import candles for this range.</p>';return;}charts.priceChart(price,data,{extraEl:extra,live,view:live?liveChartView:null,onView:live?(r,barCount)=>{liveChartView={from:r.from,to:r.to,width:r.to-r.from,follow:r.to>=barCount-1};}:null});}catch(error){price.innerHTML=`<p class="muted padded">${esc(error.message)}</p>`;}}
 async function loadMcChart(container,s,mode){const el=container.querySelector('#mc-chart');if(!el)return;el.innerHTML='<div class="chart-loading">Loading scenarios…</div>';try{const data=await api(`/api/session/${s.session_id}/monte-carlo-curves`);const set=data[mode]||data.candles||data.trades;if(!set||!set.scenarios){el.innerHTML='<p class="muted padded">No equity-curve scenarios were stored for this session.</p>';return;}charts.montecarloChart(el,{original:set.original,scenarios:set.scenarios},{height:360});}catch(error){el.innerHTML=`<p class="muted padded">${esc(error.message)}</p>`;}}
-function startWatch(id){const gen=++watchGen;lastDemoUpdate=null;watchSession(id,gen);}
+function startWatch(id){const gen=++watchGen;lastDemoUpdate=null;liveChartView=null;watchSession(id,gen);}
 async function watchSession(id,gen){if(gen!==watchGen)return;const target=document.querySelector('#active-session');if(!target)return;try{const s=await api(`/api/session/${id}`);if(gen!==watchGen)return;
   // A live demo stays "running" and streams updated results (status may briefly be
   // "canceled" while it finalizes after Stop). Keep polling, but only re-render when

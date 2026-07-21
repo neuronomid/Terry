@@ -351,8 +351,13 @@ class Simulator:
                     price = store.candles.current_1m_price(
                         pos.exchange_name, pos.symbol)
                     side = sides.SELL if pos.qty > 0 else sides.BUY
+                    # Keep a handle on the trade builder so we can flag it as merely
+                    # force-closed (i.e. still open in reality — a demo's live position).
+                    open_builder = self._open_trade.get(pos.symbol)
                     self.submit_order(strat, side, abs(pos.qty), price,
                                       role=order_roles.CLOSE_POSITION, reduce_only=True)
+                    if open_builder is not None:
+                        open_builder.is_open_at_end = True
                 elif any(order.is_active for order in strat.entry_orders):
                     self.cancel_entry_orders(pos.symbol)
                     strat.on_cancel()

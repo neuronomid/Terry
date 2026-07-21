@@ -39,8 +39,23 @@ function baseOptions(p, height) {
 
 const DASH = () => (LWC().LineStyle ? LWC().LineStyle.Dashed : 2);
 
+// Apply a saved viewport to a live chart, or default to the most recent bars at the
+// right edge. `view.follow` keeps the newest candle pinned to the right so a running
+// demo scrolls in real time instead of snapping back to the start of history.
+function applyLiveView(ts, view, barCount, rightPad = 4) {
+  if (!barCount) return;
+  const to = barCount - 1 + rightPad;
+  if (view && view.follow && view.width > 0) {
+    ts.setVisibleLogicalRange({ from: to - view.width, to });
+  } else if (view && Number.isFinite(view.from) && Number.isFinite(view.to)) {
+    ts.setVisibleLogicalRange({ from: view.from, to: view.to });
+  } else {
+    ts.setVisibleLogicalRange({ from: Math.max(-rightPad, to - 150), to });
+  }
+}
+
 // ── Candlestick chart: price + volume + trade markers + indicator overlays ──
-export function priceChart(el, data, { extraEl } = {}) {
+export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
   if (!LWC() || !el) return null;
   const p = palette();
   el.innerHTML = '';
@@ -75,7 +90,6 @@ export function priceChart(el, data, { extraEl } = {}) {
   }
 
   if (data.markers && data.markers.length) candleSeries.setMarkers(data.markers);
-  chart.timeScale().fitContent();
 
   // Extra sub-charts (e.g. RSI) stacked below, time-synced with the price chart.
   const extras = Object.entries(overlays.extra_charts || {});
@@ -105,8 +119,19 @@ export function priceChart(el, data, { extraEl } = {}) {
           axisLabelVisible: true, title });
       }
       syncTimeScales(chart, sub);
-      sub.timeScale().fitContent();
+      if (!live) sub.timeScale().fitContent();
     }
+  }
+
+  // Set the viewport last so synced sub-charts inherit it. A live demo preserves the
+  // caller's saved range (and keeps following the newest candle); everything else fits all.
+  const ts = chart.timeScale();
+  const barCount = (data.candles || []).length;
+  if (live) {
+    applyLiveView(ts, view, barCount);
+    if (onView) ts.subscribeVisibleLogicalRangeChange(r => { if (r) onView(r, barCount); });
+  } else {
+    ts.fitContent();
   }
   return chart;
 }

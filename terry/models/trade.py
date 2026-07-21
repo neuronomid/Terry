@@ -25,6 +25,9 @@ class ClosedTrade:
         self.buy_orders = []             # list of (qty, price)
         self.sell_orders = []            # list of (qty, price)
         self.leverage = 1
+        # True when the trade was still open at the end of the run and only closed by the
+        # engine's terminal force-close (e.g. the live position a demo currently holds).
+        self.is_open_at_end = False
 
     # ---- accumulation ----
     def add_order(self, order):
@@ -137,6 +140,7 @@ class ClosedTrade:
             "holding_period": self.holding_period,
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
+            "is_open_at_end": self.is_open_at_end,
             "orders": [o.to_dict() for o in self.orders],
         })
 

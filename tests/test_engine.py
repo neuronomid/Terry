@@ -175,6 +175,32 @@ def test_trade_schema():
             "fee", "holding_period", "opened_at", "closed_at", "type", "symbol"}.issubset(keys)
 
 
+def test_open_at_end_flag_marks_only_force_closed_positions():
+    """A position still open at the end (only closed by the terminal force-close) is flagged
+    is_open_at_end=True — the demo chart uses this to draw a live 'open position' marker.
+    A position the strategy exits itself is not flagged."""
+
+    class HoldToEnd(Strategy):
+        def should_long(self):
+            return self.index == 3
+        def should_short(self):
+            return False
+        def go_long(self):
+            self.buy = 0.1, self.price
+        def update_position(self):
+            pass  # never exits -> forced closed at end
+
+    class OpenThenClose(HoldToEnd):
+        def update_position(self):
+            if self.index >= 20:
+                self.liquidate()
+
+    held = _run(HoldToEnd, tf="1h")["trades"]
+    assert len(held) == 1 and held[0]["is_open_at_end"] is True
+    closed = _run(OpenThenClose, tf="1h")["trades"]
+    assert len(closed) == 1 and closed[0]["is_open_at_end"] is False
+
+
 def test_balance_conservation_closed_trades():
     """finishing_balance == starting + sum(closed PNL) - open-position entry fees."""
     res = _run(SmaCross)

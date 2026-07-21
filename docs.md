@@ -243,6 +243,15 @@ docs.md in the same change. Keep the header stats, section 5 tools, section 8 in
 config, and section 10 metrics in sync.
 
 ### Changelog
+- 0.3.1 — Strategy import & live-demo chart fixes. `POST /api/strategies/import` now accepts three
+  upload shapes: the exported bundle (`.zip`), a plain zip of the strategy folder (no manifest), and
+  a whole folder uploaded file-by-file (`{files:[{path,data}]}` — the dashboard's new 🗀 "Import
+  folder" button uses `webkitdirectory`). Uploads are normalized by locating the `__init__.py` root,
+  so extra files (e.g. a `report/` with `.md`) are preserved and `__pycache__`/`.pyc`/OS-junk are
+  skipped; traversal entries are dropped safely. The demo Price & Trades chart no longer snaps back
+  to the start of history on each live tick — it preserves the viewport and follows the newest candle
+  in real time. Positions still open in a live demo are flagged `is_open_at_end` on the trade and
+  drawn as a distinct gold "Open" marker (instead of a misleading force-close).
 - 0.3.0 — Full Jesse-parity dashboard visualizations. Backtest results now open in a tabbed report:
   Overview (grouped 44-metric tables + interactive equity curve with buy-and-hold benchmark),
   Price & Trades (TradingView Lightweight-Charts candlesticks with entry/exit markers, per-strategy

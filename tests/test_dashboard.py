@@ -82,6 +82,62 @@ def test_dashboard_serves_navigation_and_strategy_crud(tmp_path: Path):
     assert client.delete("/api/strategies/DashboardFork").json()["status"] == "deleted"
 
 
+def test_dashboard_strategy_import_accepts_zip_and_folder(tmp_path: Path):
+    """Import must accept the exported bundle (.zip), a plain zip of the strategy folder,
+    and a whole folder uploaded file-by-file — extra files (e.g. a report/) are preserved."""
+    import base64
+    import io
+    import zipfile
+
+    client = TestClient(create_app(str(tmp_path)))
+    portable_src = STRATEGY.replace("DashboardTrade", "Portable")
+    assert client.post("/api/strategies", json={"name": "Portable", "content": portable_src}).status_code == 200
+    # Drop an extra report file so we can prove non-source files survive a round trip.
+    (tmp_path / "strategies" / "Portable" / "report").mkdir()
+    (tmp_path / "strategies" / "Portable" / "report" / "summary.md").write_text("# report\n")
+
+    def b64(data: bytes) -> str:
+        return base64.b64encode(data).decode()
+
+    # 1) The exported bundle re-imports under a new name (class is renamed to match).
+    bundle = client.get("/api/strategies/Portable/export").content
+    r1 = client.post("/api/strategies/import", json={"data": b64(bundle), "name": "FromBundle"})
+    assert r1.status_code == 200 and r1.json()["name"] == "FromBundle"
+    assert "report/summary.md" in r1.json()["files"]
+    assert "class FromBundle" in client.get("/api/strategies/FromBundle").json()["content"]
+
+    # 2) A plain zip of the strategy folder (no manifest) is tolerated.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("PlainZip/__init__.py", STRATEGY.replace("DashboardTrade", "PlainZip"))
+        z.writestr("PlainZip/report/notes.md", "notes")
+        z.writestr("PlainZip/__pycache__/x.pyc", "junk")  # must be skipped
+    r2 = client.post("/api/strategies/import", json={"data": b64(buf.getvalue())})
+    assert r2.status_code == 200 and r2.json()["name"] == "PlainZip"
+    assert r2.json()["files"] == ["__init__.py", "report/notes.md"]
+
+    # 3) A whole folder uploaded as a files[] list (browser webkitdirectory upload).
+    files = [
+        {"path": "FolderUp/__init__.py", "data": b64(STRATEGY.replace("DashboardTrade", "FolderUp").encode())},
+        {"path": "FolderUp/report/r.md", "data": b64(b"# r")},
+    ]
+    r3 = client.post("/api/strategies/import", json={"files": files})
+    assert r3.status_code == 200 and r3.json()["name"] == "FolderUp"
+    assert (tmp_path / "strategies" / "FolderUp" / "report" / "r.md").exists()
+
+    # A zip with no __init__.py anywhere is rejected with a clear message.
+    empty = io.BytesIO()
+    with zipfile.ZipFile(empty, "w") as z:
+        z.writestr("readme.txt", "hi")
+    assert client.post("/api/strategies/import", json={"data": b64(empty.getvalue())}).status_code == 422
+    # A traversal entry is silently dropped, never written outside the strategies dir.
+    evil = [{"path": "../escape.py", "data": b64(b"x")},
+            {"path": "Ok/__init__.py", "data": b64(b"x")}]
+    client.post("/api/strategies/import", json={"files": evil})
+    assert not (tmp_path / "escape.py").exists()
+    assert not (tmp_path / "strategies" / "escape.py").exists()
+
+
 def test_dashboard_config_indicator_and_auth_validation(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TERRY_DASHBOARD_PASSWORD", "local-only")
     client = TestClient(create_app(str(tmp_path)))
@@ -233,8 +289,9 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "function demoForm()" in source and "paperAccountPanel" in source
     assert "Starting Paper Balance" in source and "History Lookback" in source
     assert "Start Live Demo" in source and "liveConnectingBlock" in source
-    assert "function importStrategy" in source and "/api/strategies/import" in source
-    assert "/export" in source and 'id="import-strategy"' in source
+    assert "function importStrategyZip" in source and "function importStrategyFolder" in source
+    assert "/api/strategies/import" in source and "webkitdirectory" in source
+    assert "/export" in source and 'id="import-strategy"' in source and 'id="import-folder"' in source
     assert ".trades-table th.num" in styles and ".mc-summary th" in styles
     assert "Session Title" in source and "Research Notes" in source
     assert "notes_metadata?.title" in source
