@@ -63,7 +63,7 @@ def test_dashboard_serves_navigation_and_strategy_crud(tmp_path: Path):
     assert "Terry" in page.text
     assert client.get("/app.js").status_code == 200
     assert list(client.get("/api/status").json()["sessions"]) == [
-        "backtest", "optimization", "monte_carlo", "significance_test",
+        "backtest", "demo", "optimization", "monte_carlo", "significance_test",
     ]
 
     invalid = client.post("/api/strategies", json={"name": "../unsafe"})
@@ -220,15 +220,21 @@ def test_dashboard_rejects_malformed_research_and_config_payloads(tmp_path: Path
 def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     source = Path("terry/dashboard/static/app.js").read_text(encoding="utf-8")
     styles = Path("terry/dashboard/static/styles.css").read_text(encoding="utf-8")
-    assert "mc.summary_metrics?.sharpe_ratio" in source
+    assert "c.summary_metrics?.sharpe_ratio" in source
     assert "tokenQuery" not in source
     assert "strategy-search')?.addEventListener('input'" in source
     assert 'class="skip-link"' in source
     assert "function bindCodeEditor()" in source
     assert "Ctrl/⌘+S to save" in source
-    assert "Trading Routes JSON" in source and "Data Routes JSON" in source
-    assert "JSON.parse(raw)" in source
+    assert "Trading routes" in source and "Data routes" in source
+    assert "JSON.parse(pipelineRaw)" in source
     assert "Candle Pipeline" in source and "pipeline_params_json" in source
+    # Demo Mode + strategy import/export + table-header alignment
+    assert "function demoForm()" in source and "paperAccountPanel" in source
+    assert "Starting Paper Balance" in source and "add-transfer" in source
+    assert "function importStrategy" in source and "/api/strategies/import" in source
+    assert "/export" in source and 'id="import-strategy"' in source
+    assert ".trades-table th.num" in styles and ".mc-summary th" in styles
     assert "Session Title" in source and "Research Notes" in source
     assert "notes_metadata?.title" in source
     assert "new Intl.NumberFormat" in source and "new Intl.DateTimeFormat" in source

@@ -86,6 +86,8 @@ class Runner:
         try:
             if kind == "backtest":
                 results = self._run_backtest(sid, state)
+            elif kind == "demo":
+                results = self._run_demo(sid, state)
             elif kind == "significance_test":
                 results = self._run_significance(sid, state)
             elif kind == "monte_carlo":
@@ -244,6 +246,42 @@ class Runner:
                 output["benchmark_curve"] = curve
         return output
 
+    def _run_demo(self, sid, state):
+        """Paper-trading demo: a backtest funded by a paper account (with optional
+        deposits/withdrawals) that produces the full backtest report."""
+        config, routes, data_routes, candles, warmup = self._prepare(state)
+        cashflows = _build_cashflows(state)
+        res = backtest(config, routes, data_routes, candles, warmup_candles=warmup,
+                       generate_equity_curve=True,
+                       generate_charts=state.get("export_chart", True),
+                       charts_output_root=f"{self.ctx.storage_dir}/backtest-charts",
+                       benchmark=state.get("benchmark", True),
+                       fast_mode=state.get("fast_mode", True),
+                       hyperparameters=state.get("hyperparameters"),
+                       strategies_dir=self.ctx.strategies_dir,
+                       cashflows=cashflows,
+                       should_cancel=self._should_cancel(sid))
+        self.ctx.sessions.set_progress(sid, 100)
+        daily_balance = res.get("daily_balance", []) or []
+        equity = res.get("equity_curve", []) or []
+        output = {
+            "metrics": res["metrics"],
+            "num_trades": len(res["trades"]),
+            "trades": res["trades"][:500],
+            "equity_curve": equity[::max(1, len(equity) // 500 or 1)],
+            "daily_balance": daily_balance[::max(1, len(daily_balance) // 1000 or 1)],
+            "monthly_returns": _compute_monthly_returns(daily_balance, state.get("start_date")),
+            "paper_account": _paper_account_summary(state, config, res["metrics"]),
+        }
+        for key in ("charts_session_id", "charts_folder", "chart_data"):
+            if res.get(key) is not None:
+                output[key] = res[key]
+        if daily_balance:
+            curve = self._benchmark_curve(state, output["paper_account"]["net_funded"])
+            if curve:
+                output["benchmark_curve"] = curve
+        return output
+
     def _benchmark_curve(self, state, starting_balance):
         """Daily buy-and-hold equity for the primary route, for the equity-chart overlay."""
         try:
@@ -350,6 +388,40 @@ class Runner:
             should_cancel=self._should_cancel(sid), **kwargs)
         self.ctx.sessions.set_progress(sid, 100)
         return res
+
+
+def _build_cashflows(state):
+    """Translate demo paper-money transfers into engine cashflows, applied by date.
+    Undated transfers fund the account at the start; returns None when there are none."""
+    transfers = state.get("transfers") or []
+    start_ts = jh.date_to_timestamp(state["start_date"])
+    out = []
+    for transfer in transfers:
+        amount = float(transfer.get("amount") or 0)
+        if amount <= 0:
+            continue
+        signed = amount if transfer.get("type") == "deposit" else -amount
+        date = transfer.get("date")
+        ts = jh.date_to_timestamp(date) if date else start_ts
+        out.append({"timestamp": max(ts, start_ts), "amount": signed})
+    return out or None
+
+
+def _paper_account_summary(state, config, metrics):
+    """Paper-account P&L that excludes deposits/withdrawals from trading profit."""
+    transfers = state.get("transfers") or []
+    deposits = sum(float(t.get("amount") or 0) for t in transfers if t.get("type") == "deposit")
+    withdrawals = sum(float(t.get("amount") or 0) for t in transfers if t.get("type") == "withdraw")
+    starting = float(config.get("starting_balance", 0) or 0)
+    net_funded = starting + deposits - withdrawals
+    final_equity = float(metrics.get("finishing_balance") or 0)
+    net_pnl = final_equity - net_funded
+    return {
+        "starting_balance": starting, "deposits": deposits, "withdrawals": withdrawals,
+        "net_funded": net_funded, "final_equity": final_equity, "net_pnl": net_pnl,
+        "net_pnl_percentage": (net_pnl / net_funded * 100) if net_funded else 0.0,
+        "transfers": transfers,
+    }
 
 
 def _compute_monthly_returns(daily_balance, start_date):

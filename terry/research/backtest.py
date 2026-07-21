@@ -43,7 +43,7 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
              candles_pipeline_kwargs=None, generate_charts=False,
              charts_output_root=None,
              strategies_dir=None, strategy_classes=None, strategy_sources=None,
-             signal_only=False, should_cancel=None):
+             signal_only=False, should_cancel=None, cashflows=None):
     """
     Run a single backtest. Strategy classes are resolved (in priority order) from
     `strategy_classes` (name->class), `strategy_sources` (name->source), or the
@@ -121,6 +121,7 @@ def backtest(config, routes, data_routes=None, candles=None, warmup_candles=None
     sim = Simulator(store, route_objs, data_route_objs, run_silently=True)
     sim.warmup_1m = warmup_1m
     sim.signal_only = signal_only
+    sim.cashflows = cashflows
     for r in route_objs:
         r.strategy.simulator = sim
         r.strategy.broker = sim

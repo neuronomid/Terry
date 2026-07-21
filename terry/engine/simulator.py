@@ -22,6 +22,9 @@ class Simulator:
         self.warmup_1m = 0
         self.signal_only = False
         self.signal_log = []        # list of (timestamp, close, signal) for significance testing
+        # Demo/paper-trading cashflows: list of {"timestamp": ms, "amount": signed}.
+        # None (the default) keeps backtests byte-identical — no cashflow is applied.
+        self.cashflows = None
         # per-symbol open-trade builders
         self._open_trade = {}       # symbol -> ClosedTrade (in progress)
 
@@ -273,6 +276,12 @@ class Simulator:
         equity_curve = []
         last_day = None
 
+        # Paper-money cashflows (demo mode only). Sorted once; applied by timestamp
+        # during the trading period. Empty/None → identical to a plain backtest.
+        cashflows = sorted(self.cashflows or [], key=lambda c: c["timestamp"])
+        cf_idx = 0
+        cf_exchange = self._exchange_for(self.routes[0].exchange) if self.routes else None
+
         for i in range(n):
             if should_cancel and should_cancel():
                 raise InterruptedError("Research run canceled")
@@ -286,6 +295,16 @@ class Simulator:
 
             if i < warmup_1m:
                 continue
+
+            # Deposit/withdraw paper money before this candle trades (demo mode).
+            if cf_idx < len(cashflows) and cf_exchange is not None:
+                while cf_idx < len(cashflows) and cashflows[cf_idx]["timestamp"] <= app.time:
+                    amount = float(cashflows[cf_idx]["amount"])
+                    if amount >= 0:
+                        cf_exchange.receive_quote(amount)
+                    else:  # never let a withdrawal drive the wallet negative
+                        cf_exchange.spend_quote(min(-amount, cf_exchange.balance))
+                    cf_idx += 1
 
             if not self.signal_only:
                 # fill pending orders against this 1m candle

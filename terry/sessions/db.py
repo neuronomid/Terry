@@ -6,7 +6,7 @@ import time
 
 from .. import helpers as jh
 
-VALID_KINDS = {"backtest", "significance_test", "monte_carlo", "optimization"}
+VALID_KINDS = {"backtest", "significance_test", "monte_carlo", "optimization", "demo"}
 TERMINAL = {"finished", "stopped", "terminated", "canceled"}
 
 

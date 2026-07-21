@@ -66,7 +66,7 @@ def _trades_table(trades, limit=100):
 
 
 def _body_for_kind(kind, results):
-    if kind == "backtest":
+    if kind in ("backtest", "demo"):
         return (f"<h2>Metrics</h2>{_metrics_table(results.get('metrics'))}"
                 f"<h2>Equity curve</h2>{_equity_svg(results.get('equity_curve'))}"
                 f"<h2>Trades ({results.get('num_trades', 0)})</h2>"

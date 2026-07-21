@@ -43,7 +43,7 @@ _OBJECTIVES = {
     "omega", "omega_ratio", "serenity", "serenity_index", "smart sharpe",
     "smart sortino", "net_profit_percentage",
 }
-_SESSION_KINDS = ("backtest", "optimization", "monte_carlo", "significance_test")
+_SESSION_KINDS = ("backtest", "demo", "optimization", "monte_carlo", "significance_test")
 _PIPELINE_TYPES = {"moving_block_bootstrap", "gaussian_noise", "gaussian_resampler"}
 _ENGINE_CONFIG_KEYS = {
     "starting_balance", "fee", "type", "futures_leverage", "futures_leverage_mode",
@@ -462,6 +462,36 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def _validate_transfers(value: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate demo paper-money transfers: deposits/withdrawals of paper cash, each an
+    optional date inside the run window."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _error(422, "transfers must be a JSON array.")
+    if len(value) > 100:
+        raise _error(422, "A demo can have at most 100 paper-money transfers.")
+    start, finish = state["start_date"], state.get("finish_date")
+    out = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise _error(422, f"transfers[{index}] must be an object.")
+        unknown = set(item) - {"type", "amount", "date"}
+        if unknown:
+            raise _error(422, f"Unknown transfers[{index}] field(s): {', '.join(sorted(unknown))}.")
+        if item.get("type") not in ("deposit", "withdraw"):
+            raise _error(422, f"transfers[{index}].type must be 'deposit' or 'withdraw'.")
+        entry = {"type": item["type"],
+                 "amount": _number(item.get("amount"), f"transfers[{index}].amount", exclusive=True)}
+        if item.get("date"):
+            date = _date(item["date"], f"transfers[{index}].date")
+            if date < start or (finish and date > finish):
+                raise _error(422, f"transfers[{index}].date must fall inside the demo window.")
+            entry["date"] = date
+        out.append(entry)
+    return out
+
+
 def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     if kind not in VALID_KINDS:
         raise _error(404, "Unknown research mode.", "unknown_mode")
@@ -477,6 +507,8 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
                          "best_candidates_count"},
         "backtest": {"debug_mode", "export_csv", "export_json", "export_chart",
                      "export_tradingview", "fast_mode", "benchmark"},
+        "demo": {"debug_mode", "export_csv", "export_json", "export_chart",
+                 "export_tradingview", "fast_mode", "benchmark", "transfers"},
     }[kind]
     unknown = set(payload) - allowed
     if unknown:
@@ -549,13 +581,15 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
                       "best_candidates_count": _integer(
                           payload.get("best_candidates_count", 20),
                           "best_candidates_count", 1)})
-    elif kind == "backtest":
+    elif kind in ("backtest", "demo"):
         for field, default in {
             "debug_mode": False, "export_csv": False, "export_json": False,
             "export_chart": True, "export_tradingview": False,
             "fast_mode": True, "benchmark": True,
         }.items():
             state[field] = _boolean(payload.get(field, default), field)
+        if kind == "demo":
+            state["transfers"] = _validate_transfers(payload.get("transfers"), state)
     start = _boolean(payload.get("start", True), "start")
     metadata = _session_notes_metadata(ctx, kind, state, title or None, notes or None)
     sid = ctx.sessions.create(
@@ -966,8 +1000,8 @@ def create_app(project_root: str | None = None) -> FastAPI:
         session = ctx.sessions.get(session_id)
         if session is None:
             raise _error(404, "Session was not found.", "not_found")
-        if session["kind"] != "backtest":
-            raise _error(422, "Candlestick charts are only available for backtests.")
+        if session["kind"] not in ("backtest", "demo"):
+            raise _error(422, "Candlestick charts are only available for backtests and demos.")
         state = session["state"]
         routes = state.get("routes") or [{
             "exchange": state["exchange"], "symbol": state["symbol"],
