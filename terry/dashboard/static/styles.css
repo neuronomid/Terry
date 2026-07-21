@@ -97,11 +97,12 @@ table.kv td { padding:6px 2px; border-top:1px solid var(--stroke); }
 table.kv td:first-child { color:var(--muted); }
 table.kv td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--text); }
 table.kv td.num.negative { color:var(--red); }
-/* monte-carlo summary: right-align every column header except the metric name so
-   they line up with their right-aligned numeric cells */
+/* monte-carlo summary: right-align every column header except the metric name and
+   give header + body cells the SAME padding so numbers line up under their headers */
+.mc-summary th,.mc-summary td { padding:8px 12px; }
 .mc-summary th { text-align:right; }
 .mc-summary th:first-child { text-align:left; }
-.mc-summary td:first-child { color:var(--muted); }
+.mc-summary td:first-child { color:var(--muted); text-align:left; }
 .sub { font-size:13px; margin:20px 0 10px; color:var(--subtle); }
 
 /* monthly heatmap */
@@ -133,6 +134,13 @@ svg.hist text { fill:var(--muted); font-size:10px; }
 .order-row em { color:var(--gold); font-style:normal; }
 pre.logs { background:#0d0f14; border:1px solid var(--stroke); border-radius:8px; padding:12px; font-size:12px; color:#b9bfca; max-height:340px; overflow:auto; white-space:pre-wrap; }
 .light pre.logs { background:#f2f3f6; color:#3a4150; }
+
+/* currently-open session row indication in history tables */
+#session-table tbody tr.selected { background:var(--surface-2); }
+#session-table tbody tr.selected td:first-child { box-shadow:inset 3px 0 0 var(--gold); }
+#session-table tbody tr.selected strong { color:var(--gold); }
+.row-open { color:var(--gold); font-size:10px; margin-right:2px; }
+.button-row .secondary.small.active { background:var(--gold); color:#17130c; border-color:var(--gold); }
 
 /* routing menu */
 .routes-head { display:flex; align-items:center; justify-content:space-between; margin:14px 0 8px; }
