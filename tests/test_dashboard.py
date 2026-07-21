@@ -535,6 +535,38 @@ def test_demo_live_candle_uses_mark_price_only_when_frozen(tmp_path: Path):
     assert traded["high"] == 106.0 and traded["low"] == 99.0
 
 
+def test_demo_forming_candle_seeded_from_live_price_when_bucket_empty(tmp_path: Path):
+    """Delayed feeds (Yahoo's 1m tail) never carry the still-forming minute, unlike Binance
+    klines. The forming candle must then be seeded from the live price anchored to the last
+    close so the live chart still moves tick by tick for FX/CFDs."""
+    ctx = TerryContext(str(tmp_path))
+    exchange, symbol = "Dukascopy", "EUR-USD"
+    prev_minute = jh.date_to_timestamp("2024-06-03") + 13 * 3_600_000
+    cur_minute = prev_minute + 60_000
+    # Only the previous minute is stored; the current bucket has no row yet.
+    ctx.candle_db.store(exchange, symbol, [[prev_minute, 1.10, 1.11, 1.12, 1.09, 0]])
+
+    live = ctx.runner._demo_live_candle(exchange, symbol, "1m", cur_minute, cur_minute,
+                                        live_price=1.1150)
+    assert live is not None, "forming candle must be seeded, not dropped"
+    assert live["time"] == int(cur_minute / 1000)
+    assert live["open"] == 1.11          # anchored to the previous close
+    assert live["close"] == 1.1150       # driven by the live price
+    assert live["high"] == 1.1150 and live["low"] == 1.11  # span open->live
+
+    # A rising then falling live price moves the forming candle's close/extremes tick by tick.
+    up = ctx.runner._demo_live_candle(exchange, symbol, "1m", cur_minute, cur_minute, live_price=1.1200)
+    assert up["close"] == 1.1200 and up["high"] == 1.1200
+
+    # No live price -> flat candle at the previous close (no fabricated movement).
+    flat = ctx.runner._demo_live_candle(exchange, symbol, "1m", cur_minute, cur_minute, live_price=None)
+    assert flat["open"] == 1.11 and flat["close"] == 1.11
+
+    # No prior data at all -> nothing to seed from.
+    assert ctx.runner._demo_live_candle(exchange, "GBP-USD", "1m", cur_minute, cur_minute,
+                                        live_price=1.27) is None
+
+
 def test_fetch_live_price_reads_binance_futures_mark_price(monkeypatch):
     """The live-price helper returns the futures mark price and never raises on failure."""
     from terry.data import binance

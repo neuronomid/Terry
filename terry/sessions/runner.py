@@ -437,14 +437,30 @@ class Runner:
         rows = self.ctx.candle_db.get(
             exchange, symbol, bucket_start, current_minute + 60_000)
         if not len(rows):
-            return None
+            # No stored data for the current bucket yet. Delayed feeds (Yahoo's 1m
+            # tail lags the still-forming minute) never carry the current minute, so
+            # seed a forming candle from the live price anchored to the last close.
+            # Without this the chart's live candle would never appear for FX/CFDs.
+            prior = self.ctx.candle_db.get(
+                exchange, symbol, bucket_start - 7 * 86_400_000, bucket_start)
+            if not len(prior):
+                return None
+            prev_close = float(prior[-1, 2])
+            close = float(live_price) if (live_price is not None and live_price > 0) else prev_close
+            return {
+                "time": int(bucket_start / 1000),
+                "open": prev_close, "close": close,
+                "high": max(prev_close, close), "low": min(prev_close, close),
+                "volume": 0.0, "timeframe": timeframe,
+            }
         open_price = float(rows[0, 1])
         close = float(rows[-1, 2])
         high = float(rows[:, 3].max())
         low = float(rows[:, 4].min())
         volume = float(rows[:, 5].sum())
         # "Frozen" = the newest stored minute is older than the current minute, or the current
-        # minute has zero trade volume. Either way the last-trade close is stale.
+        # minute has zero trade volume (every FX/CFD minute, which carries no real volume).
+        # Either way the last-trade close is stale and the live price should drive the candle.
         frozen = int(rows[-1, 0]) < int(current_minute) or float(rows[-1, 5]) <= 0
         if live_price is not None and live_price > 0 and frozen:
             close = float(live_price)
