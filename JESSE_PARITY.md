@@ -25,6 +25,33 @@ multiple live accounts, real/paper order routing, live logs/notifications, or DE
 The worker runtime and frontend implementation also differ. Those boundaries must not be described
 as full product parity.
 
+## Backend algorithm parity re-audit (2026-07-20)
+
+A source-level review of Terry's four research backends against the current
+`jesse-ai/jesse` `master` (`jesse/services/metrics.py`,
+`jesse/modes/optimize_mode/fitness.py`, `jesse/research/monte_carlo/*`,
+`jesse/research/rule_significance_testing/*`):
+
+- **Backtest metrics** — Sharpe/Sortino/Calmar/Omega/Serenity, max drawdown, and
+  CAGR use Jesse's exact formulas and the crypto 365-period annualization
+  (`ddof=1` std, same downside/drawdown definitions). Matches.
+- **Optimization** — identical fitness: `total > 5` gate, `total_effect_rate =
+  min(log10(total)/log10(optimal_total), 1)`, `normalize(ratio, low, high)` with
+  the same per-objective ranges (sharpe −.5/5, calmar −.5/30, sortino −.5/15,
+  omega −.5/5, serenity −.5/15), negative-ratio short-circuit, and
+  `score = total_effect_rate · ratio_normalized`. Terry uses a seeded Optuna TPE
+  study over a thread pool instead of Jesse's Ray workers (more reproducible; same
+  math). The `smart sharpe/sortino` objectives fall back to the base metric because
+  Jesse's own metrics dict does not expose `smart_*` keys.
+- **Monte Carlo** — worst_5/median/best_5 map to the 5th/50th/95th percentiles,
+  with 365-day annualization, base seed 42, and the same 2.5/5/25/75/95/97.5
+  confidence intervals. Candle pipelines (moving-block bootstrap, gaussian noise,
+  gaussian resampler) were ported from Jesse with the same defaults. Matches.
+- **Rule significance** — signal-only pass → log returns → detrend →
+  `signal · detrended` → bootstrap of zero-centred returns → `p = mean(sims ≥
+  observed)`. Matches. **Fixed:** `annualized_return` annualized over 252 days;
+  corrected to 365 to match Jesse's `TRADING_DAYS_PER_YEAR` (crypto trades 24/7).
+
 ## Capability matrix
 
 | Area | Jesse 2.5 baseline | Terry 0.2 status | Evidence / difference |

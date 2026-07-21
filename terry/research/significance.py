@@ -17,7 +17,9 @@ import numpy as np
 from .backtest import backtest
 from ._workers import parallel_results, resolve_workers
 
-TRADING_DAYS_PER_YEAR = 252
+# Crypto markets trade 24/7, so Jesse annualizes over 365 days (see
+# jesse/research/rule_significance_testing/common.py). Keep this in lockstep.
+TRADING_DAYS_PER_YEAR = 365
 MIN_OBSERVATIONS = 30
 
 
