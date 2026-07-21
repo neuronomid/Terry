@@ -75,6 +75,14 @@ td,.metric-card strong,.progress-card small { font-variant-numeric:tabular-nums;
 .tab-body [data-panel]:not(.active) { display:none; }
 .chart-box { border:1px solid var(--stroke); border-radius:10px; background:var(--surface-2); padding:12px; margin:0 0 16px; }
 .chart-title { font-size:12px; color:var(--subtle); font-weight:650; margin:2px 4px 8px; display:flex; justify-content:space-between; align-items:center; }
+.chart-toolbar { min-height:34px; gap:12px; }
+.chart-toolbar>div { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap; }
+.live-price { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; }
+.live-price .live-dot { width:6px; height:6px; }
+.live-price strong { color:var(--text); font-size:14px; font-variant-numeric:tabular-nums; }
+.chart-toggle { display:inline-flex; align-items:center; gap:7px; }
+.chart-toggle.active { color:var(--gold); border-color:#f9b53766; background:#f9b53712; }
+.dotted-swatch { width:20px; border-top:2px dotted currentColor; }
 .chart-host { width:100%; height:320px; }
 .candle-host { height:480px; }
 .mc-host { height:380px; }
@@ -123,10 +131,24 @@ svg.hist text { fill:var(--muted); font-size:10px; }
 .trades-table { width:100%; }
 .trades-table td.num,.trades-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .trades-table td.num.positive { color:var(--green); } .trades-table td.num.negative { color:var(--red); }
+.trades-toolbar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:11px; }
+.trades-toolbar>div:first-child { display:grid; gap:2px; }
+.trades-toolbar>div:first-child span { color:var(--muted); font-size:11px; }
+.trade-sort-menu { position:relative; z-index:3; }
+.trade-sort-menu>summary { display:flex; align-items:center; gap:6px; cursor:pointer; list-style:none; white-space:nowrap; }
+.trade-sort-menu>summary::-webkit-details-marker { display:none; }
+.trade-sort-menu>summary span { color:var(--muted); font-weight:500; }
+.trade-sort-popover { position:absolute; top:calc(100% + 6px); right:0; min-width:190px; display:grid; gap:3px; padding:6px; border:1px solid var(--stroke); border-radius:9px; background:var(--surface); box-shadow:0 14px 35px #0007; }
+.trade-sort-option { border:0; border-radius:6px; background:transparent; color:var(--subtle); padding:9px 10px; text-align:left; font-size:12px; }
+.trade-sort-option:hover,.trade-sort-option.active { color:var(--text); background:var(--surface-2); }
+.trade-sort-option.active { color:var(--gold); }
+.table-sort-button { width:100%; padding:0; display:inline-flex; align-items:center; justify-content:inherit; gap:5px; color:inherit; font:inherit; text-transform:inherit; letter-spacing:inherit; white-space:nowrap; }
+.trades-table th.num .table-sort-button { justify-content:flex-end; }
 .trade-row { cursor:pointer; }
 .trade-row:hover { background:var(--surface-2); }
 .tag { display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:750; text-transform:uppercase; letter-spacing:.03em; }
 .tag.long,.tag.buy { color:var(--green); background:#4dd49b1a; } .tag.short,.tag.sell { color:var(--red); background:#ff6b6b1a; }
+.tag.open { color:var(--gold); background:#f9b5371a; margin-right:4px; }
 .order-detail td { background:var(--surface-2); }
 .orders { display:grid; gap:5px; padding:4px 2px; }
 .orders strong { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
@@ -153,6 +175,7 @@ pre.logs { background:#0d0f14; border:1px solid var(--stroke); border-radius:8px
 .route-row .r-remove { color:var(--red); }
 .paper-account .headline-cards { padding:6px 0 2px; }
 @media (max-width:760px){ .route-row,#data-routes-list .route-row { grid-template-columns:1fr; } }
+@media (max-width:760px){ .chart-toolbar,.trades-toolbar { align-items:flex-start; flex-direction:column; }.chart-toolbar>div { justify-content:flex-start; }.trade-sort-popover { left:0; right:auto; } }
 /* live demo indicators */
 .live-mark { color:var(--green); font-size:11px; font-weight:800; letter-spacing:.06em; display:inline-flex; align-items:center; gap:6px; }
 .live-dot { width:8px; height:8px; border-radius:50%; background:var(--green); animation:livepulse 1.4s infinite; }

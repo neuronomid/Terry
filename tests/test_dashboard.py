@@ -6,10 +6,11 @@ import asyncio
 import threading
 from pathlib import Path
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from terry import helpers as jh
-from terry.context import TerryContext
+from terry.context import TerryContext, get_context
 from terry.dashboard.app import create_app
 from terry.data.storage import CandleDB
 from terry.mcp.server import build_server
@@ -306,6 +307,115 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "pointer:coarse" in styles
     assert ".pill.finished" in styles
     assert ".line-numbers" in styles and ".route-builder" in styles
+    # Live candle mutation + non-destructive trade connectors + modern trade sorting.
+    assert "activePriceChart?.updateCandle(live.candle)" in source
+    assert "data-trade-lines" in source and "setTradeLinesVisible" in source
+    assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
+    assert "tradeSort={key:'entry',direction:'desc'}" in source
+    assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
+
+
+def test_live_candle_refresh_updates_the_forming_row(tmp_path: Path, monkeypatch):
+    """A live refresh must request the newest timestamp again and replace its OHLCV."""
+    ctx = TerryContext(str(tmp_path))
+    exchange, symbol = "Binance Perpetual Futures", "BTC-USDT"
+    start = jh.date_to_timestamp("2024-01-01")
+    ctx.candle_db.store(exchange, symbol, [
+        [start, 100, 101, 102, 99, 10],
+    ])
+    called = {}
+
+    def fake_fetch(ex, sym, start_ts, finish_ts, should_stop=None):
+        called.update(exchange=ex, symbol=sym, start=start_ts, finish=finish_ts)
+        assert should_stop is not None and should_stop() is False
+        return np.asarray([
+            [start, 100, 102, 103, 99, 12],
+            [start + 60_000, 102, 104, 105, 101, 7],
+        ], dtype=float)
+
+    monkeypatch.setattr("terry.data.binance.fetch_1m_range", fake_fetch)
+    ctx.runner._refresh_live_candles(
+        exchange, symbol, start, start + 120_000, "live-session")
+
+    assert called["start"] == start  # not start + 60s: the open row must be re-fetched
+    rows = ctx.candle_db.get(exchange, symbol, start, start + 120_000)
+    assert rows[:, 2].tolist() == [102, 104]
+    candle = ctx.runner._demo_live_candle(
+        exchange, symbol, "5m", start, start + 60_000)
+    assert candle == {
+        "time": int(start / 1000), "open": 100.0, "close": 104.0,
+        "high": 105.0, "low": 99.0, "volume": 19.0, "timeframe": "5m",
+    }
+
+
+def test_demo_prepare_uses_exact_intraday_boundaries(tmp_path: Path):
+    """Demo strategy replay must not truncate its moving window back to UTC midnight."""
+    ctx = TerryContext(str(tmp_path))
+    exchange, symbol = "Binance Perpetual Futures", "BTC-USDT"
+    day = jh.date_to_timestamp("2024-01-01")
+    rows = [[day + i * 60_000, 100 + i, 100 + i, 101 + i, 99 + i, 1]
+            for i in range(12)]
+    ctx.candle_db.store(exchange, symbol, rows)
+    state = {
+        "exchange": exchange, "symbol": symbol, "timeframe": "1m",
+        "strategy": "DashboardTrade", "start_date": "2024-01-01",
+        "finish_date": "2024-01-02", "config": {"warm_up_candles": 0},
+    }
+    start, finish = day + 2 * 60_000, day + 9 * 60_000
+    _, _, _, candles, _ = ctx.runner._prepare(
+        state, start_ts=start, finish_ts=finish)
+    selected = candles[jh.key(exchange, symbol)]["candles"]
+    assert selected[0, 0] == start
+    assert selected[-1, 0] == finish - 60_000
+    assert len(selected) == 7
+
+
+def test_demo_candle_endpoint_includes_live_candle_and_trade_connectors(tmp_path: Path):
+    client = TestClient(create_app(str(tmp_path)))
+    ctx = get_context()
+    exchange, symbol = "Binance Perpetual Futures", "BTC-USDT"
+    start = jh.date_to_timestamp("2024-01-01")
+    ctx.candle_db.store(exchange, symbol, [
+        [start, 100, 101, 102, 99, 10],
+        [start + 60_000, 101, 102, 103, 100, 11],
+        [start + 120_000, 102, 103, 104, 101, 5],
+    ])
+    state = {
+        "exchange": exchange, "symbol": symbol, "timeframe": "1m",
+        "strategy": "DashboardTrade", "start_date": "2024-01-01",
+        "finish_date": "2024-01-02",
+    }
+    sid = ctx.sessions.create("demo", state)
+    live_candle = {"time": int((start + 120_000) / 1000), "open": 102,
+                   "close": 104, "high": 105, "low": 101, "volume": 8}
+    trade = {
+        "id": "open-trade", "symbol": symbol, "type": "long",
+        "entry_price": 101, "exit_price": 104, "opened_at": start + 60_000,
+        "closed_at": start + 180_000, "is_open_at_end": True,
+        "orders": [
+            {"side": "buy", "qty": 1, "executed_at": start + 60_000,
+             "reduce_only": False},
+            {"side": "sell", "qty": -1, "executed_at": start + 180_000,
+             "reduce_only": True},
+        ],
+    }
+    ctx.sessions.set_results(sid, {
+        "trades": [trade], "live": {
+            "is_live": True, "window_start_ts": start,
+            "updated_at": start + 150_000, "candle": live_candle,
+        },
+    }, status="running")
+
+    payload = client.get(f"/api/session/{sid}/candles").json()
+    assert payload["candles"][-1] == live_candle
+    assert len(payload["markers"]) == 1  # synthetic terminal close stays hidden
+    assert payload["markers"][0]["text"].startswith("● Open Long")
+    assert payload["trade_lines"] == [{
+        "id": "open-trade", "side": "long",
+        "open_time": int((start + 60_000) / 1000),
+        "close_time": int((start + 120_000) / 1000),
+        "entry_price": 101, "exit_price": 104, "is_open": True,
+    }]
 
 
 def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):

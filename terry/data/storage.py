@@ -57,6 +57,30 @@ class CandleDB:
         conn.commit()
         return conn.total_changes - before
 
+    def upsert(self, exchange, symbol, rows):
+        """Insert candles and refresh any matching timestamps.
+
+        Historical imports use :meth:`store` so rerunning an import still reports only newly
+        inserted rows. Live market feeds use this method because an exchange repeatedly returns
+        the still-forming one-minute candle with updated OHLCV values.
+        """
+        if len(rows) == 0:
+            return 0
+        conn = self._conn()
+        data = [(exchange, symbol, int(r[0]), float(r[1]), float(r[2]),
+                 float(r[3]), float(r[4]), float(r[5])) for r in rows]
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT INTO candles_1m "
+            "(exchange, symbol, timestamp, open, close, high, low, volume) "
+            "VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(exchange, symbol, timestamp) DO UPDATE SET "
+            "open=excluded.open, close=excluded.close, high=excluded.high, "
+            "low=excluded.low, volume=excluded.volume",
+            data)
+        conn.commit()
+        return conn.total_changes - before
+
     # ------------------------------------------------------------------ read
     def get(self, exchange, symbol, start_ts=None, finish_ts=None):
         conn = self._conn()

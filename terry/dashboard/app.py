@@ -1086,7 +1086,11 @@ def create_app(project_root: str | None = None) -> FastAPI:
             raise _error(422, "route index is out of range.")
         r = routes[route]
         exchange, symbol, timeframe = r["exchange"], r["symbol"], r["timeframe"]
-        start_ts = jh.date_to_timestamp(state["start_date"])
+        results = session.get("results") or {}
+        live = results.get("live") if isinstance(results.get("live"), dict) else {}
+        start_ts = (int(live["window_start_ts"])
+                    if session["kind"] == "demo" and live.get("window_start_ts") is not None
+                    else jh.date_to_timestamp(state["start_date"]))
         # A live demo's window advances to the present, so chart up to "now".
         finish_ts = (jh.now_to_timestamp(force_fresh=True) if session["kind"] == "demo"
                      else jh.date_to_timestamp(state["finish_date"]))
@@ -1097,6 +1101,16 @@ def create_app(project_root: str | None = None) -> FastAPI:
         agg = agg[::step]
         candles = [{"time": int(c[0] / 1000), "open": c[1], "high": c[3],
                     "low": c[4], "close": c[2], "volume": c[5]} for c in agg]
+        # The strategy only evaluates closed candles, while the chart also shows the selected
+        # timeframe's still-forming candle (the same behavior traders expect from TradingView).
+        live_candle = live.get("candle") if session["kind"] == "demo" else None
+        if isinstance(live_candle, dict) and live_candle.get("time") is not None:
+            candle = {key: live_candle.get(key) for key in
+                      ("time", "open", "high", "low", "close", "volume")}
+            if candles and candles[-1]["time"] == candle["time"]:
+                candles[-1] = candle
+            elif not candles or candles[-1]["time"] < candle["time"]:
+                candles.append(candle)
         candle_times = [c["time"] for c in candles]
 
         def _snap(order_ms):
@@ -1106,9 +1120,9 @@ def create_app(project_root: str | None = None) -> FastAPI:
             idx = bisect.bisect_right(candle_times, time) - 1
             return candle_times[max(0, idx)]
 
-        results = session.get("results") or {}
         is_demo = session["kind"] == "demo"
         markers = []
+        trade_lines = []
         for trade in results.get("trades") or []:
             if trade.get("symbol") not in (None, symbol):
                 continue
@@ -1134,6 +1148,19 @@ def create_app(project_root: str | None = None) -> FastAPI:
                     "shape": "arrowUp" if buy else "arrowDown",
                     "text": text,
                 })
+            opened_at = trade.get("opened_at")
+            entry_price = trade.get("entry_price")
+            end_time = ((live_candle or {}).get("time") if live_open
+                        else (_snap(trade["closed_at"]) if trade.get("closed_at") else None))
+            end_price = ((live_candle or {}).get("close") if live_open
+                         else trade.get("exit_price"))
+            if opened_at and entry_price is not None and end_time is not None and end_price is not None:
+                trade_lines.append({
+                    "id": trade.get("id"), "side": trade.get("type"),
+                    "open_time": _snap(opened_at), "close_time": end_time,
+                    "entry_price": entry_price, "exit_price": end_price,
+                    "is_open": bool(live_open),
+                })
         markers.sort(key=lambda m: m["time"])
         overlays = (results.get("chart_data") or {}).get(jh.key(exchange, symbol, timeframe))
         return {
@@ -1142,7 +1169,7 @@ def create_app(project_root: str | None = None) -> FastAPI:
             "routes": [{"exchange": rr["exchange"], "symbol": rr["symbol"],
                         "timeframe": rr["timeframe"], "strategy": rr.get("strategy")}
                        for rr in routes],
-            "candles": candles, "markers": markers,
+            "candles": candles, "markers": markers, "trade_lines": trade_lines[-300:],
             "overlays": _clean_json(overlays) if overlays else None,
         }
 

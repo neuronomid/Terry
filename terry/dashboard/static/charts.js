@@ -38,6 +38,7 @@ function baseOptions(p, height) {
 }
 
 const DASH = () => (LWC().LineStyle ? LWC().LineStyle.Dashed : 2);
+const DOT = () => (LWC().LineStyle ? LWC().LineStyle.Dotted : 1);
 
 // Apply a saved viewport to a live chart, or default to the most recent bars at the
 // right edge. `view.follow` keeps the newest candle pinned to the right so a running
@@ -89,7 +90,30 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
       axisLabelVisible: true, title });
   }
 
-  if (data.markers && data.markers.length) candleSeries.setMarkers(data.markers);
+  candleSeries.setMarkers(data.markers || []);
+
+  // Each trade keeps its regular entry/exit markers. These optional dotted series only
+  // connect the two events and can be hidden independently by the chart toolbar.
+  let tradeLineSeries = [];
+  const setTradeLines = (lines, visible = true) => {
+    for (const item of tradeLineSeries) {
+      try { chart.removeSeries(item.series); } catch (_) {}
+    }
+    tradeLineSeries = [];
+    for (const line of lines || []) {
+      const start = Number(line.entry_price), end = Number(line.exit_price);
+      if (!Number.isFinite(start) || !Number.isFinite(end) ||
+          !Number.isFinite(line.open_time) || !Number.isFinite(line.close_time) ||
+          line.open_time === line.close_time) continue;
+      const color = line.is_open ? p.gold : (line.side === 'short' ? p.down : p.up);
+      const series = chart.addLineSeries({ color, lineWidth: 1, lineStyle: DOT(), visible,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      series.setData([{ time: line.open_time, value: start },
+        { time: line.close_time, value: end }]);
+      tradeLineSeries.push({ series, line: { ...line } });
+    }
+  };
+  setTradeLines(data.trade_lines || [], true);
 
   // Extra sub-charts (e.g. RSI) stacked below, time-synced with the price chart.
   const extras = Object.entries(overlays.extra_charts || {});
@@ -126,14 +150,52 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
   // Set the viewport last so synced sub-charts inherit it. A live demo preserves the
   // caller's saved range (and keeps following the newest candle); everything else fits all.
   const ts = chart.timeScale();
-  const barCount = (data.candles || []).length;
+  let barCount = (data.candles || []).length;
+  let lastCandleTime = barCount ? data.candles[barCount - 1].time : null;
+  let following = view?.follow !== false;
+  let visibleWidth = view?.width || Math.max(30, Math.min(150, barCount));
   if (live) {
     applyLiveView(ts, view, barCount);
-    if (onView) ts.subscribeVisibleLogicalRangeChange(r => { if (r) onView(r, barCount); });
+    ts.subscribeVisibleLogicalRangeChange(r => {
+      if (!r) return;
+      following = r.to >= barCount - 1;
+      visibleWidth = r.to - r.from;
+      if (onView) onView({ from: r.from, to: r.to, width: visibleWidth,
+        follow: following });
+    });
   } else {
     ts.fitContent();
   }
-  return chart;
+  return {
+    chart,
+    updateCandle(candle) {
+      if (!candle || !Number.isFinite(Number(candle.time))) return;
+      const next = { time: candle.time, open: candle.open, high: candle.high,
+        low: candle.low, close: candle.close };
+      const isNew = lastCandleTime == null || candle.time > lastCandleTime;
+      candleSeries.update(next);
+      volSeries.update({ time: candle.time, value: candle.volume,
+        color: candle.close >= candle.open ? p.volUp : p.volDown });
+      if (isNew) { barCount += 1; lastCandleTime = candle.time; }
+      for (const item of tradeLineSeries) {
+        if (!item.line.is_open) continue;
+        item.line.close_time = candle.time;
+        item.line.exit_price = candle.close;
+        if (item.line.open_time !== candle.time) {
+          item.series.setData([
+            { time: item.line.open_time, value: Number(item.line.entry_price) },
+            { time: candle.time, value: Number(candle.close) },
+          ]);
+        }
+      }
+      if (live && following) applyLiveView(ts, { follow: true, width: visibleWidth }, barCount);
+    },
+    setMarkers(markers) { candleSeries.setMarkers(markers || []); },
+    setTradeLines,
+    setTradeLinesVisible(visible) {
+      tradeLineSeries.forEach(item => item.series.applyOptions({ visible }));
+    },
+  };
 }
 
 function syncTimeScales(a, b) {

@@ -118,7 +118,8 @@ class Runner:
             self._canceled.discard(sid)
 
     # ------------------------------------------------------------------ candles
-    def _prepare(self, state, start_date=None, finish_date=None):
+    def _prepare(self, state, start_date=None, finish_date=None,
+                 start_ts=None, finish_ts=None):
         from ..data.binance import EXCHANGES
         exchange = state["exchange"]
         config = self.ctx.config.engine_config(state.get("config"))
@@ -150,9 +151,11 @@ class Runner:
 
         requested_start = start_date or state["start_date"]
         requested_finish = finish_date or state.get("finish_date")
-        start_ts = jh.date_to_timestamp(requested_start)
-        finish_ts = (jh.date_to_timestamp(requested_finish)
-                     if requested_finish else jh.today_to_timestamp())
+        start_ts = (int(start_ts) if start_ts is not None
+                    else jh.date_to_timestamp(requested_start))
+        finish_ts = (int(finish_ts) if finish_ts is not None else
+                     (jh.date_to_timestamp(requested_finish)
+                      if requested_finish else jh.today_to_timestamp()))
         if finish_ts <= start_ts:
             raise ValueError("finish_date must be after start_date")
         candles, warmup_candles = {}, {}
@@ -165,7 +168,8 @@ class Runner:
                 raise MissingCandles(
                     f"No candle data for {feed_exchange} {symbol} between "
                     f"{jh.timestamp_to_date(start_ts)} and {jh.timestamp_to_date(finish_ts)}. "
-                    f"Import candles starting ~2 months before {requested_start} first."
+                    f"Import candles starting ~2 months before "
+                    f"{jh.timestamp_to_date(start_ts)} first."
                 )
             trading = rows[rows[:, 0] >= start_ts]
             warmup = rows[rows[:, 0] < start_ts]
@@ -234,7 +238,9 @@ class Runner:
         output = {
             "metrics": res["metrics"],
             "num_trades": len(res["trades"]),
-            "trades": res["trades"][:500],
+            # Retain the newest rows so the dashboard's default newest-first table always
+            # surfaces newly completed trades even in very active sessions.
+            "trades": res["trades"][-500:],
             "equity_curve": res.get("equity_curve", [])[::max(1, len(res.get("equity_curve", [])) // 500 or 1)],
             "daily_balance": daily_balance[::max(1, len(daily_balance) // 1000 or 1)],
             "monthly_returns": _compute_monthly_returns(daily_balance, state.get("start_date")),
@@ -264,21 +270,46 @@ class Runner:
         config = self.ctx.config.engine_config(state.get("config"))
         warm = int(config.get("warm_up_candles", 0) or 0)
         warmup_ms = warm * jh.timeframe_to_one_minutes(timeframe) * 60_000
-        poll_seconds = int(state.get("poll_seconds", 20))
+        # Market OHLC refreshes independently of strategy decisions. The current candle is
+        # refreshed every two seconds, while the heavier deterministic replay only runs when
+        # another one-minute candle has closed.
+        poll_seconds = int(state.get("poll_seconds", 2))
         produced = False
+        last_strategy_finish = None
+        last_strategy_update = None
         while sid not in self._canceled:
             try:
                 now_ts = jh.now_to_timestamp(force_fresh=True)
-                start_ts = now_ts - lookback_days * 86_400_000
+                current_minute = now_ts // 60_000 * 60_000
+                timeframe_ms = jh.timeframe_to_one_minutes(timeframe) * 60_000
+                current_bucket = current_minute // timeframe_ms * timeframe_ms
+                # Starting on a selected-timeframe boundary keeps the simulator's candle-close
+                # decisions aligned with the same buckets shown on the live chart.
+                start_ts = current_bucket - lookback_days * 86_400_000
                 self._refresh_live_candles(exchange, symbol, start_ts - warmup_ms, now_ts, sid)
                 if sid in self._canceled:
                     break
-                output = self._demo_backtest_window(sid, state, start_ts, now_ts)
+                live_candle = self._demo_live_candle(
+                    exchange, symbol, timeframe, current_bucket, current_minute)
+                if not produced or current_minute != last_strategy_finish:
+                    # Exclude the still-forming 1m candle. Stops/limits and selected-timeframe
+                    # entry rules therefore only see completed market data.
+                    output = self._demo_backtest_window(
+                        sid, state, start_ts, current_minute)
+                    last_strategy_finish = current_minute
+                    last_strategy_update = now_ts
+                else:
+                    session = self.ctx.sessions.get(sid) or {}
+                    output = dict(session.get("results") or {})
                 output["live"] = {
                     "is_live": True, "updated_at": now_ts, "poll_seconds": poll_seconds,
                     "lookback_days": lookback_days,
                     "window_start": jh.timestamp_to_date(start_ts),
                     "window_end": jh.timestamp_to_date(now_ts),
+                    "window_start_ts": start_ts, "window_end_ts": current_minute,
+                    "strategy_updated_at": last_strategy_update,
+                    "price": live_candle.get("close") if live_candle else None,
+                    "candle": live_candle,
                 }
                 self.ctx.sessions.set_results(sid, output, status="running")
                 produced = True
@@ -310,25 +341,41 @@ class Runner:
         self.ctx.sessions.set_results(sid, final, status="finished")
 
     def _refresh_live_candles(self, exchange, symbol, start_ts, finish_ts, sid):
-        """Ensure the local store holds 1m candles up to `finish_ts`, fetching only the
-        gap since the newest stored candle in the window."""
+        """Refresh the live tail of the local 1m store through ``finish_ts``.
+
+        The newest exchange candle is still forming, so it must be fetched again instead of
+        advancing past its timestamp. ``CandleDB.upsert`` replaces that row's evolving OHLCV.
+        """
         from ..data.binance import fetch_1m_range
         existing = self.ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
         fetch_from = start_ts
         if len(existing):
-            fetch_from = max(start_ts, int(existing[-1][0]) + 60_000)
+            fetch_from = max(start_ts, int(existing[-1][0]))
         if fetch_from >= finish_ts:
             return
         chunk = fetch_1m_range(exchange, symbol, fetch_from, finish_ts,
                                should_stop=lambda: sid in self._canceled)
         if len(chunk):
-            self.ctx.candle_db.store(exchange, symbol, chunk)
+            self.ctx.candle_db.upsert(exchange, symbol, chunk)
+
+    def _demo_live_candle(self, exchange, symbol, timeframe, bucket_start, current_minute):
+        """Build the selected timeframe's still-forming candle from refreshed 1m rows."""
+        rows = self.ctx.candle_db.get(
+            exchange, symbol, bucket_start, current_minute + 60_000)
+        if not len(rows):
+            return None
+        return {
+            "time": int(bucket_start / 1000),
+            "open": float(rows[0, 1]), "close": float(rows[-1, 2]),
+            "high": float(rows[:, 3].max()), "low": float(rows[:, 4].min()),
+            "volume": float(rows[:, 5].sum()), "timeframe": timeframe,
+        }
 
     def _demo_backtest_window(self, sid, state, start_ts, finish_ts):
         start_date = jh.timestamp_to_date(start_ts)
         finish_date = jh.timestamp_to_date(finish_ts)
         config, routes, data_routes, candles, warmup = self._prepare(
-            state, start_date, finish_date)
+            state, start_date, finish_date, start_ts=start_ts, finish_ts=finish_ts)
         res = backtest(config, routes, data_routes, candles, warmup_candles=warmup,
                        generate_equity_curve=True, benchmark=state.get("benchmark", True),
                        fast_mode=state.get("fast_mode", True),
@@ -340,7 +387,7 @@ class Runner:
         output = {
             "metrics": res["metrics"],
             "num_trades": len(res["trades"]),
-            "trades": res["trades"][:500],
+            "trades": res["trades"][-500:],
             "equity_curve": equity[::max(1, len(equity) // 500 or 1)],
             "daily_balance": daily_balance[::max(1, len(daily_balance) // 1000 or 1)],
             "monthly_returns": _compute_monthly_returns(daily_balance, start_date),
