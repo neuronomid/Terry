@@ -102,14 +102,17 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
     tradeLineSeries = [];
     for (const line of lines || []) {
       const start = Number(line.entry_price), end = Number(line.exit_price);
+      const openTime = Number(line.open_time), rawCloseTime = Number(line.close_time);
       if (!Number.isFinite(start) || !Number.isFinite(end) ||
-          !Number.isFinite(line.open_time) || !Number.isFinite(line.close_time) ||
-          line.open_time === line.close_time) continue;
+          !Number.isFinite(openTime) || !Number.isFinite(rawCloseTime)) continue;
+      // Lightweight Charts needs distinct ordered timestamps for a two-point segment. Keep
+      // even same-tick round trips visible as a near-vertical connector instead of dropping it.
+      const closeTime = rawCloseTime > openTime ? rawCloseTime : openTime + 1;
       const color = line.is_open ? p.gold : (line.side === 'short' ? p.down : p.up);
-      const series = chart.addLineSeries({ color, lineWidth: 1, lineStyle: DOT(), visible,
-        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
-      series.setData([{ time: line.open_time, value: start },
-        { time: line.close_time, value: end }]);
+      const series = chart.addLineSeries({ color, lineWidth: 2, lineStyle: DOT(), visible,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        pointMarkersVisible: true, pointMarkersRadius: 2 });
+      series.setData([{ time: openTime, value: start }, { time: closeTime, value: end }]);
       tradeLineSeries.push({ series, line: { ...line } });
     }
   };
@@ -181,14 +184,15 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
       if (isNew) { barCount += 1; lastCandleTime = candle.time; }
       for (const item of tradeLineSeries) {
         if (!item.line.is_open) continue;
-        item.line.close_time = candle.time;
+        const openTime = Number(item.line.open_time);
+        const liveTime = Number(candle.tick_time ?? candle.time);
+        const closeTime = liveTime > openTime ? liveTime : openTime + 1;
+        item.line.close_time = closeTime;
         item.line.exit_price = candle.close;
-        if (item.line.open_time !== candle.time) {
-          item.series.setData([
-            { time: item.line.open_time, value: Number(item.line.entry_price) },
-            { time: candle.time, value: Number(candle.close) },
-          ]);
-        }
+        item.series.setData([
+          { time: openTime, value: Number(item.line.entry_price) },
+          { time: closeTime, value: Number(candle.close) },
+        ]);
       }
       if (live && following) applyLiveView(ts, { follow: true, width: visibleWidth }, barCount);
     },

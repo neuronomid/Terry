@@ -83,6 +83,7 @@ td,.metric-card strong,.progress-card small { font-variant-numeric:tabular-nums;
 .chart-toggle { display:inline-flex; align-items:center; gap:7px; }
 .chart-toggle.active { color:var(--gold); border-color:#f9b53766; background:#f9b53712; }
 .dotted-swatch { width:20px; border-top:2px dotted currentColor; }
+.live-price.delayed { color:var(--red); }
 .chart-host { width:100%; height:320px; }
 .candle-host { height:480px; }
 .mc-host { height:380px; }

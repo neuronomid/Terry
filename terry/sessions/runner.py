@@ -271,12 +271,13 @@ class Runner:
         warm = int(config.get("warm_up_candles", 0) or 0)
         warmup_ms = warm * jh.timeframe_to_one_minutes(timeframe) * 60_000
         # Market OHLC refreshes independently of strategy decisions. The current candle is
-        # refreshed every two seconds, while the heavier deterministic replay only runs when
+        # refreshed every second, while the heavier deterministic replay only runs when
         # another one-minute candle has closed.
-        poll_seconds = int(state.get("poll_seconds", 2))
+        poll_seconds = max(1, int(state.get("poll_seconds", 1)))
         produced = False
         last_strategy_finish = None
         last_strategy_update = None
+        live_tick = 0
         while sid not in self._canceled:
             try:
                 now_ts = jh.now_to_timestamp(force_fresh=True)
@@ -291,6 +292,11 @@ class Runner:
                     break
                 live_candle = self._demo_live_candle(
                     exchange, symbol, timeframe, current_bucket, current_minute)
+                if live_candle is not None:
+                    # Candle ``time`` is its selected-timeframe bucket. ``tick_time`` tracks
+                    # the current minute independently so an open-trade connector can advance
+                    # without changing the candlestick's stable bucket identity.
+                    live_candle["tick_time"] = int(current_minute / 1000)
                 if not produced or current_minute != last_strategy_finish:
                     # Exclude the still-forming 1m candle. Stops/limits and selected-timeframe
                     # entry rules therefore only see completed market data.
@@ -301,8 +307,12 @@ class Runner:
                 else:
                     session = self.ctx.sessions.get(sid) or {}
                     output = dict(session.get("results") or {})
+                output.pop("error", None)
+                output.pop("message", None)
+                live_tick += 1
                 output["live"] = {
                     "is_live": True, "updated_at": now_ts, "poll_seconds": poll_seconds,
+                    "tick": live_tick,
                     "lookback_days": lookback_days,
                     "window_start": jh.timestamp_to_date(start_ts),
                     "window_end": jh.timestamp_to_date(now_ts),
@@ -317,10 +327,19 @@ class Runner:
                 break
             except Exception as exc:  # keep the live session alive across transient errors
                 message = f"{type(exc).__name__}: {exc}"
-                if not produced:
-                    self.ctx.sessions.set_results(
-                        sid, {"error": "live_error", "message": message,
-                              "live": {"is_live": True, "error": message}}, status="running")
+                # Never leave the UI looking silently frozen. Preserve the most recent valid
+                # candle/report, advance the feed revision, and expose the delayed-feed error.
+                live_tick += 1
+                session = self.ctx.sessions.get(sid) or {}
+                output = dict(session.get("results") or {})
+                previous_live = dict(output.get("live") or {})
+                output.update({"error": "live_error", "message": message})
+                output["live"] = {
+                    **previous_live, "is_live": True, "error": message,
+                    "updated_at": jh.now_to_timestamp(force_fresh=True),
+                    "poll_seconds": poll_seconds, "tick": live_tick,
+                }
+                self.ctx.sessions.set_results(sid, output, status="running")
             for _ in range(max(1, poll_seconds)):
                 if sid in self._canceled:
                     break

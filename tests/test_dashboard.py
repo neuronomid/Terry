@@ -318,6 +318,7 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     # Live candle mutation + non-destructive trade connectors + modern trade sorting.
     assert "activePriceChart?.updateCandle?.(live.candle)" in source
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
+    assert "data-live-feed" in source and "Feed delayed" in source
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
@@ -332,16 +333,26 @@ def test_price_chart_preserves_native_chart_and_exposes_live_controller_methods(
 import fs from 'node:fs';
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const charts = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
-const makeSeries = () => ({
-  setData() {}, update() {}, setMarkers() {}, createPriceLine() {}, applyOptions() {},
-});
+const seriesByKind = { candle: [], volume: [], line: [] };
+const makeSeries = (kind, options = {}) => {
+  const series = {
+    kind, options, dataCalls: [], updateCalls: [], optionCalls: [], markerCalls: [],
+    setData(data) { this.dataCalls.push(data); },
+    update(data) { this.updateCalls.push(data); },
+    setMarkers(data) { this.markerCalls.push(data); },
+    createPriceLine() {},
+    applyOptions(data) { this.optionCalls.push(data); },
+  };
+  seriesByKind[kind].push(series);
+  return series;
+};
 const timeScale = {
   fitContent() {}, setVisibleLogicalRange() {}, subscribeVisibleLogicalRangeChange() {},
 };
 const nativeChart = {
-  addCandlestickSeries: makeSeries,
-  addHistogramSeries: makeSeries,
-  addLineSeries: makeSeries,
+  addCandlestickSeries(options) { return makeSeries('candle', options); },
+  addHistogramSeries(options) { return makeSeries('volume', options); },
+  addLineSeries(options) { return makeSeries('line', options); },
   priceScale() { return { applyOptions() {} }; },
   timeScale() { return timeScale; },
   removeSeries() {}, remove() {},
@@ -353,16 +364,40 @@ globalThis.window = { LightweightCharts: {
 globalThis.document = { body: { classList: { contains() { return false; } } } };
 const controller = charts.priceChart(
   { innerHTML: '', clientHeight: 460 },
-  { candles: [{ time: 1, open: 10, high: 12, low: 9, close: 11, volume: 5 }] },
+  {
+    candles: [{ time: 1, open: 10, high: 12, low: 9, close: 11, volume: 5 }],
+    trade_lines: [
+      { id: 'open', side: 'long', open_time: 1, close_time: 2,
+        entry_price: 10, exit_price: 11, is_open: true },
+      { id: 'same-tick', side: 'short', open_time: 3, close_time: 3,
+        entry_price: 12, exit_price: 11, is_open: false },
+    ],
+  },
 );
 if (controller !== nativeChart) throw new Error('priceChart no longer returns the native chart');
 for (const method of ['updateCandle', 'setMarkers', 'setTradeLines', 'setTradeLinesVisible']) {
   if (typeof controller[method] !== 'function') throw new Error(`missing ${method}`);
 }
-controller.updateCandle({ time: 2, open: 11, high: 13, low: 10, close: 12, volume: 6 });
+if (seriesByKind.line.length !== 2) throw new Error('one connector per trade was not created');
+for (const series of seriesByKind.line) {
+  if (series.options.lineStyle !== 1 || series.options.lineWidth !== 2)
+    throw new Error('connector is not a visible dotted line');
+}
+const sameTickData = seriesByKind.line[1].dataCalls[0];
+if (sameTickData[0].time !== 3 || sameTickData[1].time !== 4)
+  throw new Error('same-tick connector was not retained');
+controller.setTradeLinesVisible(false);
+if (seriesByKind.line.some(series => series.optionCalls.at(-1)?.visible !== false))
+  throw new Error('connector toggle did not hide every trade line');
+controller.updateCandle({ time: 2, tick_time: 5, open: 11, high: 13, low: 10,
+  close: 12, volume: 6 });
+if (seriesByKind.candle[0].updateCalls.at(-1)?.close !== 12 ||
+    seriesByKind.volume[0].updateCalls.at(-1)?.value !== 6)
+  throw new Error('live OHLCV did not update both chart series');
+if (seriesByKind.line[0].dataCalls.at(-1)?.[1]?.time !== 5)
+  throw new Error('open connector did not advance with the live candle');
 controller.setMarkers([]);
 controller.setTradeLines([], false);
-controller.setTradeLinesVisible(false);
 """
     completed = subprocess.run(
         [node, "--input-type=module", "-e", script,
@@ -470,9 +505,104 @@ def test_demo_candle_endpoint_includes_live_candle_and_trade_connectors(tmp_path
     assert payload["trade_lines"] == [{
         "id": "open-trade", "side": "long",
         "open_time": int((start + 60_000) / 1000),
-        "close_time": int((start + 120_000) / 1000),
+        "close_time": int((start + 150_000) / 1000),
         "entry_price": 101, "exit_price": 104, "is_open": True,
     }]
+
+
+def test_trade_connectors_keep_exact_times_and_cover_every_displayed_trade(tmp_path: Path):
+    """1h round trips must not collapse or disappear once a result exceeds 300 trades."""
+    client = TestClient(create_app(str(tmp_path)))
+    ctx = get_context()
+    exchange, symbol = "Binance Perpetual Futures", "SOL-USDT"
+    start = jh.date_to_timestamp("2024-01-01")
+    ctx.candle_db.store(exchange, symbol, [
+        [start + minute * 60_000, 70, 70, 71, 69, 1]
+        for minute in range(61)
+    ])
+    state = {
+        "exchange": exchange, "symbol": symbol, "timeframe": "1h",
+        "strategy": "ConnectorTest", "start_date": "2024-01-01",
+        "finish_date": "2024-01-02",
+    }
+    sid = ctx.sessions.create("backtest", state)
+    trades = [{
+        "id": f"trade-{index}", "symbol": symbol, "type": "long",
+        "entry_price": 70, "exit_price": 71,
+        "opened_at": start + 10 * 60_000,
+        "closed_at": start + 20 * 60_000,
+        "orders": [],
+    } for index in range(301)]
+    ctx.sessions.set_results(sid, {"trades": trades}, status="finished")
+
+    lines = client.get(f"/api/session/{sid}/candles").json()["trade_lines"]
+
+    assert len(lines) == len(trades)
+    assert lines[0]["id"] == "trade-0"  # oldest displayed trade is no longer truncated
+    assert lines[-1]["id"] == "trade-300"
+    assert lines[0]["open_time"] == int((start + 10 * 60_000) / 1000)
+    assert lines[0]["close_time"] == int((start + 20 * 60_000) / 1000)
+    assert lines[0]["open_time"] != lines[0]["close_time"]
+
+
+def test_demo_loop_publishes_each_market_tick_and_surfaces_feed_errors(
+        tmp_path: Path, monkeypatch):
+    """Demo price/candle revisions must advance independently of strategy replay."""
+    ctx = TerryContext(str(tmp_path))
+    state = {
+        "exchange": "Binance Perpetual Futures", "symbol": "SOL-USDT",
+        "timeframe": "1m", "strategy": "TickTest", "lookback_days": 1,
+        "start_date": "2024-01-01", "finish_date": "2024-01-02",
+    }
+    sid = ctx.sessions.create("demo", state)
+    now = jh.date_to_timestamp("2024-01-02") + 30_000
+    monkeypatch.setattr(jh, "now_to_timestamp", lambda force_fresh=False: now)
+    refreshes = 0
+
+    def refresh(*_args, **_kwargs):
+        nonlocal refreshes
+        refreshes += 1
+        if refreshes == 3:
+            raise RuntimeError("temporary market feed failure")
+
+    prices = iter((100.0, 101.0))
+    monkeypatch.setattr(ctx.runner, "_refresh_live_candles", refresh)
+    monkeypatch.setattr(ctx.runner, "_demo_live_candle", lambda *_args: {
+        "time": int((now // 60_000 * 60_000) / 1000),
+        "open": 99.0, "close": next(prices), "high": 102.0,
+        "low": 98.0, "volume": float(refreshes), "timeframe": "1m",
+    })
+    monkeypatch.setattr(ctx.runner, "_demo_backtest_window", lambda *_args: {
+        "metrics": {"starting_balance": 10_000}, "trades": [],
+        "equity_curve": [], "daily_balance": [],
+    })
+    monkeypatch.setattr(ctx, "write_report", lambda *_args: "")
+    published = []
+    original_set_results = ctx.sessions.set_results
+
+    def capture(session_id, results, status="finished"):
+        if status == "running":
+            published.append(dict(results.get("live") or {}))
+        return original_set_results(session_id, results, status=status)
+
+    monkeypatch.setattr(ctx.sessions, "set_results", capture)
+    sleeps = 0
+
+    def stop_after_three_ticks(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 3:
+            ctx.runner._canceled.add(sid)
+
+    monkeypatch.setattr(time, "sleep", stop_after_three_ticks)
+
+    ctx.runner._run_demo_live(sid, state)
+
+    assert [item["tick"] for item in published] == [1, 2, 3]
+    assert [item.get("price") for item in published[:2]] == [100.0, 101.0]
+    assert all(item["poll_seconds"] == 1 for item in published)
+    assert published[0]["candle"]["tick_time"] == int((now // 60_000 * 60_000) / 1000)
+    assert published[-1]["error"] == "RuntimeError: temporary market feed failure"
 
 
 def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):

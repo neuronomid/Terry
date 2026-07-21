@@ -1122,6 +1122,9 @@ def create_app(project_root: str | None = None) -> FastAPI:
             idx = bisect.bisect_right(candle_times, time) - 1
             return candle_times[max(0, idx)]
 
+        def _seconds(timestamp_ms):
+            return int(float(timestamp_ms) / 1000)
+
         is_demo = session["kind"] == "demo"
         markers = []
         trade_lines = []
@@ -1152,14 +1155,22 @@ def create_app(project_root: str | None = None) -> FastAPI:
                 })
             opened_at = trade.get("opened_at")
             entry_price = trade.get("entry_price")
-            end_time = ((live_candle or {}).get("time") if live_open
-                        else (_snap(trade["closed_at"]) if trade.get("closed_at") else None))
+            # Markers must attach to a selected-timeframe candle, but connectors must retain
+            # their exact execution times. Snapping a short trade's two ends to (for example)
+            # the same 1h candle collapses the segment to zero width and makes it disappear.
+            end_time = (((live_candle or {}).get("tick_time") or
+                         (_seconds(live["window_end_ts"])
+                          if live.get("window_end_ts") is not None else
+                          (_seconds(live["updated_at"])
+                           if live.get("updated_at") is not None else None)))
+                        if live_open else
+                        (_seconds(trade["closed_at"]) if trade.get("closed_at") else None))
             end_price = ((live_candle or {}).get("close") if live_open
                          else trade.get("exit_price"))
             if opened_at and entry_price is not None and end_time is not None and end_price is not None:
                 trade_lines.append({
                     "id": trade.get("id"), "side": trade.get("type"),
-                    "open_time": _snap(opened_at), "close_time": end_time,
+                    "open_time": _seconds(opened_at), "close_time": int(end_time),
                     "entry_price": entry_price, "exit_price": end_price,
                     "is_open": bool(live_open),
                 })
@@ -1171,7 +1182,9 @@ def create_app(project_root: str | None = None) -> FastAPI:
             "routes": [{"exchange": rr["exchange"], "symbol": rr["symbol"],
                         "timeframe": rr["timeframe"], "strategy": rr.get("strategy")}
                        for rr in routes],
-            "candles": candles, "markers": markers, "trade_lines": trade_lines[-300:],
+            # Results already retain at most 500 displayed trades. Return a connector for
+            # every one of them so visible markers never outnumber visible trade lines.
+            "candles": candles, "markers": markers, "trade_lines": trade_lines,
             "overlays": _clean_json(overlays) if overlays else None,
         }
 
