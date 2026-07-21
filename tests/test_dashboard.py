@@ -321,7 +321,7 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
     assert "data-live-feed" in source and "Feed delayed" in source
     assert "CHART_ASSET_VERSION" in source and "&reload=${Date.now()}" in source
-    assert "app.js?v=20260721-live-candle-v2" in index
+    assert "app.js?v=20260721-live-candle-v4" in index
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
@@ -412,6 +412,68 @@ controller.setTradeLines([], false);
     assert completed.returncode == 0, completed.stderr
 
 
+def test_live_chart_follows_new_bars_but_preserves_a_scrolled_viewport():
+    """Real-time ticks must not move the viewport unless a new bar arrives while pinned right."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the dashboard module contract test")
+    script = r"""
+import fs from 'node:fs';
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const charts = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const makeSeries = () => ({
+  setData() {}, update() {}, setMarkers() {}, createPriceLine() {}, applyOptions() {},
+});
+let rangeCallback = null;
+const rangeCalls = [];
+const timeScale = {
+  fitContent() {},
+  setVisibleLogicalRange(range) { rangeCalls.push(range); },
+  subscribeVisibleLogicalRangeChange(cb) { rangeCallback = cb; },
+};
+const nativeChart = {
+  addCandlestickSeries() { return makeSeries(); },
+  addHistogramSeries() { return makeSeries(); },
+  addLineSeries() { return makeSeries(); },
+  priceScale() { return { applyOptions() {} }; },
+  timeScale() { return timeScale; },
+  removeSeries() {}, remove() {},
+};
+globalThis.window = { LightweightCharts: {
+  LineStyle: { Dashed: 2, Dotted: 1 }, createChart() { return nativeChart; },
+} };
+globalThis.document = { body: { classList: { contains() { return false; } } } };
+const controller = charts.priceChart(
+  { innerHTML: '', clientHeight: 460 },
+  { candles: [{ time: 1, open: 10, high: 12, low: 9, close: 11, volume: 5 }] },
+  { live: true },
+);
+const afterMount = rangeCalls.length;              // the initial pin to the right edge
+// In-place update of the still-forming candle: the viewport must NOT move.
+controller.updateCandle({ time: 1, open: 10, high: 13, low: 9, close: 12, volume: 6 });
+if (rangeCalls.length !== afterMount)
+  throw new Error('in-place tick moved the viewport');
+// A brand-new bar while still pinned right: the viewport re-pins to follow it.
+controller.updateCandle({ time: 2, open: 12, high: 14, low: 11, close: 13, volume: 4 });
+if (rangeCalls.length !== afterMount + 1)
+  throw new Error('new bar did not advance the followed viewport');
+// The user scrolls far back into history (barCount is now 2, pinned "to" ~= 5).
+rangeCallback({ from: -100, to: -50 });
+const afterScroll = rangeCalls.length;
+// New bars now stream in, but the user's chosen range must be left untouched.
+controller.updateCandle({ time: 3, open: 13, high: 15, low: 12, close: 14, volume: 3 });
+controller.updateCandle({ time: 4, open: 14, high: 16, low: 13, close: 15, volume: 2 });
+if (rangeCalls.length !== afterScroll)
+  throw new Error('a scrolled-away viewport was yanked back by live updates');
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "-e", script,
+         str(Path("terry/dashboard/static/charts.js").resolve())],
+        check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_live_candle_refresh_updates_the_forming_row(tmp_path: Path, monkeypatch):
     """A live refresh must request the newest timestamp again and replace its OHLCV."""
     ctx = TerryContext(str(tmp_path))
@@ -443,6 +505,62 @@ def test_live_candle_refresh_updates_the_forming_row(tmp_path: Path, monkeypatch
         "time": int(start / 1000), "open": 100.0, "close": 104.0,
         "high": 105.0, "low": 99.0, "volume": 19.0, "timeframe": "5m",
     }
+
+
+def test_demo_live_candle_uses_mark_price_only_when_frozen(tmp_path: Path):
+    """Zero-volume symbols must track the live price; traded symbols keep their true close."""
+    ctx = TerryContext(str(tmp_path))
+    exchange, symbol = "Binance Perpetual Futures", "GME-USDT"
+    minute = jh.date_to_timestamp("2024-01-01")
+
+    # A frozen minute: the current bucket printed no trades, so the klines close is stale.
+    ctx.candle_db.store(exchange, symbol, [[minute, 21.8, 21.8, 21.8, 21.8, 0]])
+    frozen = ctx.runner._demo_live_candle(
+        exchange, symbol, "1m", minute, minute, live_price=21.79)
+    assert frozen["close"] == 21.79          # driven by the live mark price
+    assert frozen["low"] == 21.79            # high/low widened to include it
+    assert frozen["high"] == 21.8
+    assert frozen["volume"] == 0.0
+
+    # Without a live price the frozen candle stays put (no fabricated movement).
+    assert ctx.runner._demo_live_candle(
+        exchange, symbol, "1m", minute, minute, live_price=None)["close"] == 21.8
+
+    # A traded minute ignores the live price and keeps its exact last-trade close/extremes.
+    liquid = "BTC-USDT"
+    ctx.candle_db.store(exchange, liquid, [[minute, 100.0, 105.0, 106.0, 99.0, 7]])
+    traded = ctx.runner._demo_live_candle(
+        exchange, liquid, "1m", minute, minute, live_price=999.0)
+    assert traded["close"] == 105.0
+    assert traded["high"] == 106.0 and traded["low"] == 99.0
+
+
+def test_fetch_live_price_reads_binance_futures_mark_price(monkeypatch):
+    """The live-price helper returns the futures mark price and never raises on failure."""
+    from terry.data import binance
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"markPrice": "21.79451101"}
+
+    class _FakeSession:
+        def get(self, url, params=None, timeout=None):
+            assert url.endswith("/fapi/v1/premiumIndex")
+            assert params["symbol"] == "GMEUSDT"
+            return _FakeResponse()
+
+    monkeypatch.setattr(binance, "_session", lambda: _FakeSession())
+    assert binance.fetch_live_price("Binance Perpetual Futures", "GME-USDT") == 21.79451101
+
+    # A transient network error resolves to None rather than propagating into the demo loop.
+    def _boom():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(binance, "_session", _boom)
+    assert binance.fetch_live_price("Binance Perpetual Futures", "GME-USDT") is None
+    assert binance.fetch_live_price("Totally Unknown Exchange", "GME-USDT") is None
 
 
 def test_demo_prepare_uses_exact_intraday_boundaries(tmp_path: Path):
@@ -572,7 +690,8 @@ def test_demo_loop_publishes_each_market_tick_and_surfaces_feed_errors(
 
     prices = iter((100.0, 101.0))
     monkeypatch.setattr(ctx.runner, "_refresh_live_candles", refresh)
-    monkeypatch.setattr(ctx.runner, "_demo_live_candle", lambda *_args: {
+    monkeypatch.setattr(ctx.runner, "_demo_live_price", lambda *_args: None)
+    monkeypatch.setattr(ctx.runner, "_demo_live_candle", lambda *_args, **_kw: {
         "time": int((now // 60_000 * 60_000) / 1000),
         "open": 99.0, "close": next(prices), "high": 102.0,
         "low": 98.0, "volume": float(refreshes), "timeframe": "1m",

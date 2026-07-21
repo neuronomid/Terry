@@ -40,10 +40,14 @@ function baseOptions(p, height) {
 const DASH = () => (LWC().LineStyle ? LWC().LineStyle.Dashed : 2);
 const DOT = () => (LWC().LineStyle ? LWC().LineStyle.Dotted : 1);
 
+// Fixed gap (in bars) kept to the right of the newest candle when following, so the live
+// bar isn't glued to the price axis. Shared by the viewport setter and the follow test.
+const RIGHT_PAD = 4;
+
 // Apply a saved viewport to a live chart, or default to the most recent bars at the
 // right edge. `view.follow` keeps the newest candle pinned to the right so a running
 // demo scrolls in real time instead of snapping back to the start of history.
-function applyLiveView(ts, view, barCount, rightPad = 4) {
+function applyLiveView(ts, view, barCount, rightPad = RIGHT_PAD) {
   if (!barCount) return;
   const to = barCount - 1 + rightPad;
   if (view && view.follow && view.width > 0) {
@@ -162,7 +166,10 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
     applyLiveView(ts, view, barCount);
     ts.subscribeVisibleLogicalRangeChange(r => {
       if (!r) return;
-      following = r.to >= barCount - 1;
+      // Follow only while the view is essentially pinned to the right edge (the newest bar
+      // sits in its RIGHT_PAD gap). Any deliberate leftward drag past ~half a bar releases
+      // the follow so real-time updates never yank the user's chosen zoom/scroll back.
+      following = r.to >= barCount - 1 + RIGHT_PAD - 0.5;
       visibleWidth = r.to - r.from;
       if (onView) onView({ from: r.from, to: r.to, width: visibleWidth,
         follow: following });
@@ -195,7 +202,12 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
           { time: closeTime, value: Number(candle.close) },
         ]);
       }
-      if (live && following) applyLiveView(ts, { follow: true, width: visibleWidth }, barCount);
+      // Only re-pin the viewport when a brand-new bar arrives (and we're following). In-place
+      // updates to the still-forming candle must never move the view, or a user inspecting an
+      // earlier range would see it snap back on every tick.
+      if (live && following && isNew) {
+        applyLiveView(ts, { follow: true, width: visibleWidth }, barCount);
+      }
     },
     setMarkers(markers) { candleSeries.setMarkers(markers || []); },
     setTradeLines,

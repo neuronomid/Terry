@@ -190,6 +190,83 @@ def fetch_1m_range(exchange, symbol, start_ts, finish_ts, on_progress=None,
     return array[np.sort(unique_indices)]
 
 
+def fetch_live_price(exchange, symbol):
+    """Best-effort real-time price for a live demo's still-forming candle.
+
+    Zero-volume or thinly traded symbols (tokenized-equity perps outside market hours,
+    obscure low-caps) keep a *frozen* last-trade price in their 1m klines, so a demo chart
+    built from klines alone looks stuck even while the market moves. Futures venues still
+    publish a live mark price that tracks the underlying index; spot venues expose a
+    real-time last-trade ticker. Returning that lets the forming candle keep moving tick by
+    tick for every symbol. Returns ``None`` (leaving the klines close untouched) whenever no
+    live price can be resolved, so a transient failure never breaks the demo loop.
+    """
+    try:
+        base, _, market_type = exchange_endpoint(exchange)
+    except ValueError:
+        return None
+    try:
+        session = _session()
+        if exchange.startswith("Binance"):
+            if market_type == "futures":
+                response = session.get(base + "/fapi/v1/premiumIndex", params={
+                    "symbol": jh.dashless_symbol(symbol)}, timeout=10)
+                if response.status_code // 100 == 2:
+                    return float(response.json()["markPrice"])
+            else:
+                response = session.get(base + "/api/v3/ticker/price", params={
+                    "symbol": jh.dashless_symbol(symbol)}, timeout=10)
+                if response.status_code // 100 == 2:
+                    return float(response.json()["price"])
+        elif exchange.startswith("Bybit"):
+            category = "spot" if exchange == "Bybit Spot" else "linear"
+            response = session.get(base + "/v5/market/tickers", params={
+                "category": category, "symbol": jh.dashless_symbol(symbol)}, timeout=10)
+            if response.status_code // 100 == 2:
+                rows = ((response.json().get("result") or {}).get("list")) or []
+                if rows:
+                    price = rows[0].get("markPrice") or rows[0].get("lastPrice")
+                    if price:
+                        return float(price)
+        elif exchange == "Gate USDT Perpetual":
+            response = session.get(base + "/api/v4/futures/usdt/tickers", params={
+                "contract": symbol.replace("-", "_").upper()}, timeout=10)
+            if response.status_code // 100 == 2:
+                rows = response.json()
+                if rows:
+                    price = rows[0].get("mark_price") or rows[0].get("last")
+                    if price:
+                        return float(price)
+        elif exchange == "Coinbase Spot":
+            response = session.get(f"{base}/api/v3/brokerage/market/products/{symbol}",
+                                   timeout=10)
+            if response.status_code // 100 == 2:
+                price = response.json().get("price")
+                if price:
+                    return float(price)
+        elif exchange == "Bitfinex Spot":
+            network_symbol = symbol.replace("-", "").upper()
+            response = session.get(f"{base}/v2/ticker/t{network_symbol}", timeout=10)
+            if response.status_code // 100 == 2:
+                data = response.json()
+                if isinstance(data, list) and len(data) >= 7:
+                    return float(data[6])  # last traded price
+        elif exchange == "Kraken Pro Futures":
+            base_asset, quote_asset = symbol.upper().split("-", 1)
+            base_asset = "XBT" if base_asset == "BTC" else base_asset
+            wanted = f"pf_{base_asset}{quote_asset}".lower()
+            response = session.get(f"{base}/derivatives/api/v3/tickers", timeout=10)
+            if response.status_code // 100 == 2:
+                for row in response.json().get("tickers", []):
+                    if str(row.get("symbol", "")).lower() == wanted:
+                        price = row.get("markPrice") or row.get("last")
+                        if price:
+                            return float(price)
+    except Exception:
+        return None
+    return None
+
+
 def get_starting_time(exchange, symbol):
     """Return the earliest public timestamp where the exchange provides a reliable probe."""
     base, path, _ = exchange_endpoint(exchange)

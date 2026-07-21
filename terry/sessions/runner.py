@@ -277,6 +277,7 @@ class Runner:
         produced = False
         last_strategy_finish = None
         last_strategy_update = None
+        last_live_price = None
         live_tick = 0
         while sid not in self._canceled:
             try:
@@ -290,8 +291,17 @@ class Runner:
                 self._refresh_live_candles(exchange, symbol, start_ts - warmup_ms, now_ts, sid)
                 if sid in self._canceled:
                     break
+                # Real-time price for the forming candle so zero-volume symbols still move.
+                # Reuse the last good price when a fetch transiently fails (e.g. a rate limit)
+                # so the forming candle holds steady instead of flickering back to the stale
+                # klines close.
+                live_price = self._demo_live_price(exchange, symbol)
+                if live_price is None:
+                    live_price = last_live_price
+                elif live_price > 0:
+                    last_live_price = live_price
                 live_candle = self._demo_live_candle(
-                    exchange, symbol, timeframe, current_bucket, current_minute)
+                    exchange, symbol, timeframe, current_bucket, current_minute, live_price)
                 if live_candle is not None:
                     # Candle ``time`` is its selected-timeframe bucket. ``tick_time`` tracks
                     # the current minute independently so an open-trade connector can advance
@@ -377,17 +387,47 @@ class Runner:
         if len(chunk):
             self.ctx.candle_db.upsert(exchange, symbol, chunk)
 
-    def _demo_live_candle(self, exchange, symbol, timeframe, bucket_start, current_minute):
-        """Build the selected timeframe's still-forming candle from refreshed 1m rows."""
+    def _demo_live_price(self, exchange, symbol):
+        """Fetch the exchange's real-time mark/last price, or None on any failure.
+
+        Isolated so the live loop stays resilient (a flaky ticker never stalls trading) and
+        so tests can stub it without hitting the network.
+        """
+        from ..data.binance import fetch_live_price
+        try:
+            return fetch_live_price(exchange, symbol)
+        except Exception:
+            return None
+
+    def _demo_live_candle(self, exchange, symbol, timeframe, bucket_start,
+                          current_minute, live_price=None):
+        """Build the selected timeframe's still-forming candle from refreshed 1m rows.
+
+        ``live_price`` (a real-time mark/last price) keeps illiquid symbols moving: when the
+        current minute printed no trades the klines close is frozen, so the chart would look
+        stuck. In that case we drive the forming candle's close from the live price and widen
+        its high/low to match, while liquid symbols keep their exact traded close.
+        """
         rows = self.ctx.candle_db.get(
             exchange, symbol, bucket_start, current_minute + 60_000)
         if not len(rows):
             return None
+        open_price = float(rows[0, 1])
+        close = float(rows[-1, 2])
+        high = float(rows[:, 3].max())
+        low = float(rows[:, 4].min())
+        volume = float(rows[:, 5].sum())
+        # "Frozen" = the newest stored minute is older than the current minute, or the current
+        # minute has zero trade volume. Either way the last-trade close is stale.
+        frozen = int(rows[-1, 0]) < int(current_minute) or float(rows[-1, 5]) <= 0
+        if live_price is not None and live_price > 0 and frozen:
+            close = float(live_price)
+            high = max(high, close)
+            low = min(low, close)
         return {
             "time": int(bucket_start / 1000),
-            "open": float(rows[0, 1]), "close": float(rows[-1, 2]),
-            "high": float(rows[:, 3].max()), "low": float(rows[:, 4].min()),
-            "volume": float(rows[:, 5].sum()), "timeframe": timeframe,
+            "open": open_price, "close": close,
+            "high": high, "low": low, "volume": volume, "timeframe": timeframe,
         }
 
     def _demo_backtest_window(self, sid, state, start_ts, finish_ts):
