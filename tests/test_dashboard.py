@@ -285,6 +285,7 @@ def test_dashboard_rejects_malformed_research_and_config_payloads(tmp_path: Path
 def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     source = Path("terry/dashboard/static/app.js").read_text(encoding="utf-8")
     styles = Path("terry/dashboard/static/styles.css").read_text(encoding="utf-8")
+    index = Path("terry/dashboard/static/index.html").read_text(encoding="utf-8")
     assert "c.summary_metrics?.sharpe_ratio" in source
     assert "tokenQuery" not in source
     assert "strategy-search')?.addEventListener('input'" in source
@@ -319,6 +320,8 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "activePriceChart?.updateCandle?.(live.candle)" in source
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
     assert "data-live-feed" in source and "Feed delayed" in source
+    assert "CHART_ASSET_VERSION" in source and "&reload=${Date.now()}" in source
+    assert "app.js?v=20260721-live-candle-v2" in index
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
@@ -375,6 +378,8 @@ const controller = charts.priceChart(
   },
 );
 if (controller !== nativeChart) throw new Error('priceChart no longer returns the native chart');
+if (seriesByKind.candle[0].options.lastPriceAnimation !== 2)
+  throw new Error('live candle updates do not animate the last-price marker');
 for (const method of ['updateCandle', 'setMarkers', 'setTradeLines', 'setTradeLinesVisible']) {
   if (typeof controller[method] !== 'function') throw new Error(`missing ${method}`);
 }

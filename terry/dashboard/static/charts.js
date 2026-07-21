@@ -64,6 +64,7 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
   const candleSeries = chart.addCandlestickSeries({
     upColor: p.up, downColor: p.down, borderUpColor: p.up, borderDownColor: p.down,
     wickUpColor: p.up, wickDownColor: p.down,
+    lastPriceAnimation: LWC().LastPriceAnimationMode?.OnDataUpdate ?? 2,
   });
   candleSeries.setData((data.candles || []).map(c => ({
     time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
