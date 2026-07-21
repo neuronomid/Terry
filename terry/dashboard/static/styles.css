@@ -97,6 +97,11 @@ table.kv td { padding:6px 2px; border-top:1px solid var(--stroke); }
 table.kv td:first-child { color:var(--muted); }
 table.kv td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--text); }
 table.kv td.num.negative { color:var(--red); }
+/* monte-carlo summary: right-align every column header except the metric name so
+   they line up with their right-aligned numeric cells */
+.mc-summary th { text-align:right; }
+.mc-summary th:first-child { text-align:left; }
+.mc-summary td:first-child { color:var(--muted); }
 .sub { font-size:13px; margin:20px 0 10px; color:var(--subtle); }
 
 /* monthly heatmap */
@@ -115,7 +120,7 @@ svg.hist text { fill:var(--muted); font-size:10px; }
 
 /* trades table */
 .trades-table { width:100%; }
-.trades-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
+.trades-table td.num,.trades-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .trades-table td.num.positive { color:var(--green); } .trades-table td.num.negative { color:var(--red); }
 .trade-row { cursor:pointer; }
 .trade-row:hover { background:var(--surface-2); }

@@ -88,6 +88,14 @@ class Importer:
         with self._lock:
             return dict(self._status.get(import_id, {"status": "not_found", "import_id": import_id}))
 
+    def active_imports(self):
+        """In-progress imports, newest first. Lets the dashboard re-attach its progress
+        bar after a full page reload (which drops the browser's in-memory import id)."""
+        with self._lock:
+            active = [dict(status) for status in self._status.values()
+                      if status.get("status") in {"started", "running"}]
+        return list(reversed(active))
+
     def cancel(self, import_id):
         with self._lock:
             flag = self._stop_flags.get(import_id)

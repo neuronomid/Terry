@@ -594,7 +594,8 @@ def create_app(project_root: str | None = None) -> FastAPI:
 
     @app.get("/api/candles")
     def list_candles(_: None = Depends(auth)):
-        return {"existing": ctx.candle_db.existing(), "exchanges": list(EXCHANGES)}
+        return {"existing": ctx.candle_db.existing(), "exchanges": list(EXCHANGES),
+                "active_imports": ctx.importer.active_imports()}
 
     @app.post("/api/candles/import")
     def import_candles(payload: dict[str, Any], _: None = Depends(auth)):
