@@ -12,6 +12,41 @@ from .. import helpers as jh
 ONE_MIN_MS = 60_000
 
 
+def fill_1m_gaps(candles_1m: np.ndarray) -> np.ndarray:
+    """Return a contiguous 1m array, filling missing minutes with flat candles.
+
+    Session markets (Forex, indices, commodities, stock CFDs) close on weekends and
+    holidays, so their stored 1m candles are non-contiguous. Terry's timeframe
+    aggregation reshapes fixed blocks of consecutive rows and its daily-balance /
+    monthly-return attribution assume one row per minute, so gaps would misalign both.
+    Filling gaps with flat candles (open=close=high=low=previous close, volume=0) keeps
+    every downstream engine assumption identical to the always-on crypto case. Closed
+    periods carry a flat price, so strategies see no movement and place no fills there.
+    """
+    if len(candles_1m) < 2:
+        return candles_1m
+    ts = candles_1m[:, 0].astype(np.int64)
+    start, end = int(ts[0]), int(ts[-1])
+    full_ts = np.arange(start, end + 1, ONE_MIN_MS, dtype=np.int64)
+    if len(full_ts) == len(candles_1m):
+        return candles_1m  # already contiguous — no-op (the crypto path)
+    pos = ((ts - start) // ONE_MIN_MS).astype(np.int64)
+    out = np.zeros((len(full_ts), 6))
+    out[:, 0] = full_ts
+    out[pos, 1:] = candles_1m[:, 1:]
+    valid = np.zeros(len(full_ts), dtype=bool)
+    valid[pos] = True
+    # forward-fill each missing row's flat price from the previous real close
+    last_valid = np.where(valid, np.arange(len(full_ts)), 0)
+    np.maximum.accumulate(last_valid, out=last_valid)
+    prev_close = out[last_valid, 2]
+    missing = ~valid
+    for col in (1, 2, 3, 4):  # open, close, high, low -> flat at previous close
+        out[missing, col] = prev_close[missing]
+    out[missing, 5] = 0.0  # volume
+    return out
+
+
 def aggregate_candles(candles_1m: np.ndarray, timeframe: str) -> np.ndarray:
     """Aggregate a 1m candle array into `timeframe` candles (full array, non-causal)."""
     tf = jh.timeframe_to_one_minutes(timeframe)

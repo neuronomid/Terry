@@ -858,3 +858,107 @@ def test_indicator_and_mcp_surfaces_are_complete(tmp_path: Path):
         schemas["create_monte_carlo_draft"])
     assert {"routes", "data_routes", "random_seed", "cpu_cores"}.issubset(
         schemas["create_significance_test_draft"])
+
+
+def test_candles_endpoint_exposes_asset_classes(tmp_path: Path):
+    """The Assets selector needs Cryptocurrency + Dukascopy-backed non-crypto classes."""
+    client = TestClient(create_app(str(tmp_path)))
+    data = client.get("/api/candles").json()
+    assert "Dukascopy" in data["exchanges"]
+    by_name = {c["name"]: c for c in data["asset_classes"]}
+    assert "Cryptocurrency" in by_name and "Dukascopy" not in by_name["Cryptocurrency"]["exchanges"]
+    assert by_name["Forex"]["exchanges"] == ["Dukascopy"]
+    assert by_name["Forex"]["example"] == "EUR-USD"
+    assert "US500-USD" in by_name["Indices"]["symbols"]
+
+
+def test_dukascopy_import_flow_stores_forex_candles(tmp_path: Path, monkeypatch):
+    """A Dukascopy import must flow through the importer and land 1m FX candles."""
+    # Fake the hourly .bi5 transport: one tick per minute, EURUSD-scaled bid prices.
+    def fake_hour(instrument, scale, hour, session):
+        assert instrument == "EURUSD" and scale == 100000
+        return [(hour + i * 60_000 + 500, 1.08 + i * 0.0001, 1.0) for i in range(60)]
+
+    monkeypatch.setattr("terry.data.dukascopy.fetch_hour_ticks", fake_hour)
+    client = TestClient(create_app(str(tmp_path)))
+    started = client.post("/api/candles/import", json={
+        "exchange": "Dukascopy", "symbol": "EUR-USD",
+        "start_date": "2024-06-03", "finish_date": "2024-06-04",
+    })
+    assert started.status_code == 200, started.json()
+    import_id = started.json()["import_id"]
+
+    deadline = time.monotonic() + 8
+    status = {}
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/candles/import/{import_id}").json()
+        if status["status"] in {"finished", "error", "canceled"}:
+            break
+        time.sleep(0.05)
+    assert status["status"] == "finished", status
+    assert status["candles_imported"] > 0
+
+    existing = {(r["exchange"], r["symbol"]) for r in client.get("/api/candles").json()["existing"]}
+    assert ("Dukascopy", "EUR-USD") in existing
+    ctx = get_context()
+    rows = ctx.candle_db.get("Dukascopy", "EUR-USD")
+    assert len(rows) > 0 and 1.0 < rows[0, 1] < 1.2   # bid prices decoded at the right scale
+
+
+def test_backtest_runs_on_gappy_forex_data(tmp_path: Path):
+    """Forex candles are gappy (weekends/holidays); the runner must gap-fill them so a
+    backtest completes exactly as it does for contiguous crypto data."""
+    ctx = TerryContext(str(tmp_path))
+    start = jh.date_to_timestamp("2024-06-03")  # Monday
+    rows = []
+    for index in range(300):
+        # a deliberate one-hour hole in the middle to exercise fill_1m_gaps
+        if 120 <= index < 180:
+            continue
+        price = 1.08 + index * 0.0001
+        rows.append([start + index * 60_000, price, price, price + 0.0002, price - 0.0002, 5])
+    ctx.candle_db.store("Dukascopy", "EUR-USD", rows)
+
+    client = TestClient(create_app(str(tmp_path)))
+    assert client.patch("/api/config", json={"warm_up_candles": 0}).status_code == 200
+    assert client.post("/api/strategies", json={"name": "DashboardTrade", "content": STRATEGY}).status_code == 200
+    created = client.post("/api/sessions/backtest", json={
+        "strategy": "DashboardTrade", "exchange": "Dukascopy", "symbol": "EUR-USD",
+        "timeframe": "1m", "start_date": "2024-06-03", "finish_date": "2024-06-04",
+        "export_chart": False,
+    })
+    assert created.status_code == 200, created.json()
+    session = _wait_for_session(client, created.json()["session_id"])
+    assert session["status"] == "finished", session
+    assert session["results"]["metrics"]["total"] >= 1
+    # gap-fill made the timeline contiguous: 300 spanned minutes, 60 of them filled flat.
+    stored = ctx.candle_db.get("Dukascopy", "EUR-USD")
+    assert len(stored) == 240
+
+
+def test_demo_routes_session_market_to_yahoo(tmp_path: Path, monkeypatch):
+    """A Dukascopy demo must pull its live tail/price from Yahoo, not the .bi5 feed."""
+    ctx = TerryContext(str(tmp_path))
+    from terry.data import yahoo
+    price_calls = []
+    monkeypatch.setattr(yahoo, "fetch_live_price", lambda symbol: price_calls.append(symbol) or 1.2345)
+    # _demo_live_price must resolve session markets through Yahoo…
+    assert ctx.runner._demo_live_price("Dukascopy", "EUR-USD") == 1.2345
+    assert price_calls == ["EUR-USD"]
+    # …and never route crypto through it.
+    from terry.data import binance
+    monkeypatch.setattr(binance, "fetch_live_price", lambda ex, sym: 999.0)
+    assert ctx.runner._demo_live_price("Binance Perpetual Futures", "BTC-USDT") == 999.0
+
+    # _refresh_live_candles must call Yahoo's range fetch for a session market.
+    range_calls = []
+
+    def fake_range(symbol, start_ts, finish_ts, should_stop=None):
+        range_calls.append(symbol)
+        return np.asarray([[start_ts, 1.1, 1.1, 1.1, 1.1, 0.0]], dtype=float)
+
+    monkeypatch.setattr(yahoo, "fetch_1m_range", fake_range)
+    ctx.runner._refresh_live_candles("Dukascopy", "EUR-USD", start := jh.date_to_timestamp("2024-06-03"),
+                                     start + 60_000, "live-session")
+    assert range_calls == ["EUR-USD"]
+    assert len(ctx.candle_db.get("Dukascopy", "EUR-USD")) == 1

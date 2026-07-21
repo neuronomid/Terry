@@ -859,7 +859,10 @@ def create_app(project_root: str | None = None) -> FastAPI:
 
     @app.get("/api/candles")
     def list_candles(_: None = Depends(auth)):
+        from ..data.instruments import DUKASCOPY_EXCHANGE, dashboard_asset_classes
+        crypto_exchanges = [ex for ex in EXCHANGES if ex != DUKASCOPY_EXCHANGE]
         return {"existing": ctx.candle_db.existing(), "exchanges": list(EXCHANGES),
+                "asset_classes": dashboard_asset_classes(crypto_exchanges),
                 "active_imports": ctx.importer.active_imports()}
 
     @app.post("/api/candles/import")

@@ -9,14 +9,18 @@ def register_candles_tools(mcp):
     @mcp.tool()
     def import_candles(exchange: str, symbol: str, start_date: str,
                        import_id: str = None, *, finish_date: str = None) -> dict:
-        """Start importing 1m candles from a free public exchange API (returns immediately).
+        """Start importing 1m candles from a free public source (returns immediately).
 
         Poll get_candle_import_status(import_id) until status == "finished". Data already in
         the store is skipped automatically, so re-running from the same start_date is safe.
 
+        Crypto exchanges (Binance/Bybit/…) provide their own symbols. The "Dukascopy"
+        source provides non-crypto assets (Forex, metals, energy, indices, stock CFDs) as
+        BASE-QUOTE symbols, e.g. "EUR-USD", "XAU-USD", "WTI-USD", "US500-USD", "AAPL-USD".
+
         Args:
-            exchange: e.g. "Binance Perpetual Futures" or "Binance Spot".
-            symbol:   e.g. "BTC-USDT".
+            exchange: e.g. "Binance Perpetual Futures", "Binance Spot", or "Dukascopy".
+            symbol:   e.g. "BTC-USDT" (crypto) or "EUR-USD" (Dukascopy).
             start_date: "YYYY-MM-DD".
             finish_date: optional "YYYY-MM-DD" (defaults to today).
         """

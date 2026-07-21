@@ -161,6 +161,8 @@ class Runner:
         candles, warmup_candles = {}, {}
         unique_feeds = {(route["exchange"], route["symbol"]): route
                         for route in all_routes}
+        from ..data.binance import is_session_market
+        from ..engine.candle_store import fill_1m_gaps
         for (feed_exchange, symbol), route in unique_feeds.items():
             rows = self.ctx.candle_db.get(
                 feed_exchange, symbol, start_ts - warmup_ms, finish_ts)
@@ -171,6 +173,11 @@ class Runner:
                     f"Import candles starting ~2 months before "
                     f"{jh.timestamp_to_date(start_ts)} first."
                 )
+            # Session markets (Forex/CFDs) are gappy over weekends/holidays; fill to a
+            # contiguous 1m timeline so timeframe aggregation and daily-balance stay
+            # aligned exactly as they do for 24/7 crypto. No-op for gapless crypto data.
+            if is_session_market(feed_exchange):
+                rows = fill_1m_gaps(rows)
             trading = rows[rows[:, 0] >= start_ts]
             warmup = rows[rows[:, 0] < start_ts]
             tf = jh.timeframe_to_one_minutes(route["timeframe"])
@@ -331,6 +338,12 @@ class Runner:
                     "price": live_candle.get("close") if live_candle else None,
                     "candle": live_candle,
                 }
+                from ..data.binance import is_session_market
+                if is_session_market(exchange):
+                    # Surface FX session + open/closed so the UI can explain a still
+                    # forming candle over the weekend instead of looking frozen.
+                    from ..data import market_hours
+                    output["live"]["session"] = market_hours.session_info(now_ts)
                 self.ctx.sessions.set_results(sid, output, status="running")
                 produced = True
             except InterruptedError:
@@ -374,16 +387,25 @@ class Runner:
 
         The newest exchange candle is still forming, so it must be fetched again instead of
         advancing past its timestamp. ``CandleDB.upsert`` replaces that row's evolving OHLCV.
+
+        Session markets (Dukascopy FX/CFDs) use Yahoo Finance for the live tail because
+        the Dukascopy ``.bi5`` feed is delayed; the rows are stored under the same
+        exchange/symbol key so the demo's backtest window reads one consistent series.
         """
-        from ..data.binance import fetch_1m_range
+        from ..data.binance import fetch_1m_range, is_session_market
         existing = self.ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
         fetch_from = start_ts
         if len(existing):
             fetch_from = max(start_ts, int(existing[-1][0]))
         if fetch_from >= finish_ts:
             return
-        chunk = fetch_1m_range(exchange, symbol, fetch_from, finish_ts,
-                               should_stop=lambda: sid in self._canceled)
+        if is_session_market(exchange):
+            from ..data import yahoo
+            chunk = yahoo.fetch_1m_range(symbol, fetch_from, finish_ts,
+                                         should_stop=lambda: sid in self._canceled)
+        else:
+            chunk = fetch_1m_range(exchange, symbol, fetch_from, finish_ts,
+                                   should_stop=lambda: sid in self._canceled)
         if len(chunk):
             self.ctx.candle_db.upsert(exchange, symbol, chunk)
 
@@ -391,10 +413,14 @@ class Runner:
         """Fetch the exchange's real-time mark/last price, or None on any failure.
 
         Isolated so the live loop stays resilient (a flaky ticker never stalls trading) and
-        so tests can stub it without hitting the network.
+        so tests can stub it without hitting the network. Session markets (Dukascopy FX/CFDs)
+        resolve their real-time price from Yahoo Finance instead of the delayed .bi5 feed.
         """
-        from ..data.binance import fetch_live_price
+        from ..data.binance import fetch_live_price, is_session_market
         try:
+            if is_session_market(exchange):
+                from ..data import yahoo
+                return yahoo.fetch_live_price(symbol)
             return fetch_live_price(exchange, symbol)
         except Exception:
             return None

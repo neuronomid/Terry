@@ -34,7 +34,17 @@ EXCHANGES = {
         "https://api.gateio.ws", "/api/v4/futures/usdt/candlesticks", "futures"),
     "Kraken Pro Futures": (
         "https://futures.kraken.com", "/api/charts/v1/trade", "futures"),
+    # Non-crypto session markets (FX, metals, energy, indices, stock CFDs). Historical
+    # 1m backfill comes from Dukascopy's public .bi5 feed; Demo Mode live data comes
+    # from Yahoo Finance (see terry.data.dukascopy / terry.data.yahoo). Treated as
+    # "spot" by the engine (no funding, leverage 1).
+    "Dukascopy": ("https://datafeed.dukascopy.com", "/datafeed", "spot"),
 }
+
+# Exchanges whose markets are not 24/7 (weekends/holidays create gaps) and whose live
+# demo feed is Yahoo rather than the historical source. The runner uses this to fill
+# candle gaps for the engine and to route Demo Mode's live price/candles.
+SESSION_MARKETS = {"Dukascopy"}
 
 DEFAULT_EXCHANGE = "Binance Perpetual Futures"
 MAX_LIMIT = 1000
@@ -55,6 +65,11 @@ def exchange_endpoint(exchange: str):
     if exchange not in EXCHANGES:
         raise ValueError(f"Unknown exchange '{exchange}'. Supported: {list(EXCHANGES)}")
     return EXCHANGES[exchange]
+
+
+def is_session_market(exchange: str) -> bool:
+    """True for non-24/7 markets (Dukascopy FX/CFDs) that need gap-fill + Yahoo live."""
+    return exchange in SESSION_MARKETS
 
 
 def _session():
@@ -161,6 +176,11 @@ def fetch_1m_chunk(exchange, symbol, start_ts, session=None):
 def fetch_1m_range(exchange, symbol, start_ts, finish_ts, on_progress=None,
                    should_stop=None, rate_limit_sleep=0.25):
     """Fetch all 1m candles in ``[start_ts, finish_ts)`` and normalize/deduplicate them."""
+    if exchange == "Dukascopy":
+        from . import dukascopy
+        return dukascopy.fetch_1m_range(
+            symbol, start_ts, finish_ts, on_progress=on_progress,
+            should_stop=should_stop)
     session = _session()
     total = max(finish_ts - start_ts, 1)
     cursor = start_ts
@@ -201,6 +221,10 @@ def fetch_live_price(exchange, symbol):
     tick for every symbol. Returns ``None`` (leaving the klines close untouched) whenever no
     live price can be resolved, so a transient failure never breaks the demo loop.
     """
+    if exchange == "Dukascopy":
+        # Dukascopy is a delayed historical feed; live demos use Yahoo instead
+        # (routed by the runner). No real-time price here.
+        return None
     try:
         base, _, market_type = exchange_endpoint(exchange)
     except ValueError:
@@ -269,6 +293,9 @@ def fetch_live_price(exchange, symbol):
 
 def get_starting_time(exchange, symbol):
     """Return the earliest public timestamp where the exchange provides a reliable probe."""
+    if exchange == "Dukascopy":
+        from . import dukascopy
+        return dukascopy.get_starting_time(symbol)
     base, path, _ = exchange_endpoint(exchange)
     session = _session()
     if exchange.startswith("Binance"):
