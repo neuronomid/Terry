@@ -102,10 +102,12 @@ async function home() {
 async function strategies() {
   const data = await api('/api/strategies'); const selected = state.strategy || data.strategies[0]?.name;
   let editor = empty('Select a strategy', 'Create or select a strategy from the list.', '<button class="primary" id="new-strategy">New strategy</button>');
-  if (selected) { try { const item = await api(`/api/strategies/${encodeURIComponent(selected)}`); state.strategy = selected; editor = `<div class="editor-head"><div><h2>${esc(selected)}</h2><p>${item.validation_error ? `<span class="validation error-text">⚠ ${esc(item.validation_error)}</span>` : '<span class="validation">● Imports successfully</span>'}</p></div><div class="button-row"><button class="secondary" id="fork">Fork</button><button class="danger-text" id="delete">Delete</button><button class="primary" id="save">Save</button></div></div><div class="code-shell"><pre class="line-numbers" id="line-numbers" aria-hidden="true"></pre><textarea class="code-editor" spellcheck="false" autocapitalize="off" autocomplete="off" id="strategy-code" aria-label="Strategy source code">${esc(item.content)}</textarea></div><div class="editor-status"><span id="cursor-position">Ln 1, Col 1</span><span>Python · Spaces: 4 · Ctrl/⌘+S to save</span></div>`; } catch (_) { state.strategy = null; } }
-  shell('Strategies', `<div class="split strategy-layout"><aside class="list-panel"><div class="panel-head"><strong>Strategies</strong><button class="icon-button" id="new-strategy" aria-label="New strategy">＋</button></div><input id="strategy-search" name="strategy_search" autocomplete="off" aria-label="Search strategies" placeholder="Search strategies…"><div class="strategy-list">${data.strategies.length ? data.strategies.map(item => `<button class="strategy-item ${item.name === selected ? 'selected' : ''}" data-name="${esc(item.name)}"><span aria-hidden="true">⌘</span><span>${esc(item.name)}${item.validation_error ? '<em title="Needs attention" aria-label="Needs attention">●</em>' : ''}</span></button>`).join('') : '<p class="muted">No strategies yet.</p>'}</div></aside><section class="workspace">${editor}</section></div>`, 'Write Python strategies, then use them in any research mode.');
+  if (selected) { try { const item = await api(`/api/strategies/${encodeURIComponent(selected)}`); state.strategy = selected; editor = `<div class="editor-head"><div><h2>${esc(selected)}</h2><p>${item.validation_error ? `<span class="validation error-text">⚠ ${esc(item.validation_error)}</span>` : '<span class="validation">● Imports successfully</span>'}</p></div><div class="button-row"><a class="secondary" id="export" href="/api/strategies/${encodeURIComponent(selected)}/export" download>Export</a><button class="secondary" id="fork">Fork</button><button class="danger-text" id="delete">Delete</button><button class="primary" id="save">Save</button></div></div><div class="code-shell"><pre class="line-numbers" id="line-numbers" aria-hidden="true"></pre><textarea class="code-editor" spellcheck="false" autocapitalize="off" autocomplete="off" id="strategy-code" aria-label="Strategy source code">${esc(item.content)}</textarea></div><div class="editor-status"><span id="cursor-position">Ln 1, Col 1</span><span>Python · Spaces: 4 · Ctrl/⌘+S to save</span></div>`; } catch (_) { state.strategy = null; } }
+  shell('Strategies', `<div class="split strategy-layout"><aside class="list-panel"><div class="panel-head"><strong>Strategies</strong><div class="button-row"><button class="icon-button" id="import-strategy" aria-label="Import strategy" title="Import a strategy bundle (.zip)">⇪</button><button class="icon-button" id="new-strategy" aria-label="New strategy" title="New strategy">＋</button></div></div><input type="file" id="import-file" accept=".zip,application/zip" hidden><input id="strategy-search" name="strategy_search" autocomplete="off" aria-label="Search strategies" placeholder="Search strategies…"><div class="strategy-list">${data.strategies.length ? data.strategies.map(item => `<button class="strategy-item ${item.name === selected ? 'selected' : ''}" data-name="${esc(item.name)}"><span aria-hidden="true">⌘</span><span>${esc(item.name)}${item.validation_error ? '<em title="Needs attention" aria-label="Needs attention">●</em>' : ''}</span></button>`).join('') : '<p class="muted">No strategies yet.</p>'}</div></aside><section class="workspace">${editor}</section></div>`, 'Write Python strategies, then use them in any research mode.');
   document.querySelectorAll('.strategy-item').forEach(button => button.addEventListener('click', () => { if (!confirmDiscard()) return; state.strategy = button.dataset.name; render(); }));
   document.querySelectorAll('#new-strategy').forEach(button => button.addEventListener('click', createStrategy));
+  document.querySelector('#import-strategy')?.addEventListener('click', () => { if (!confirmDiscard()) return; document.querySelector('#import-file')?.click(); });
+  document.querySelector('#import-file')?.addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) importStrategy(file); });
   document.querySelector('#strategy-search')?.addEventListener('input', event => { const query=event.target.value.trim().toLowerCase(); document.querySelectorAll('.strategy-item').forEach(item => { item.hidden=!item.dataset.name.toLowerCase().includes(query); }); });
   bindCodeEditor();
   document.querySelector('#save')?.addEventListener('click', async event => { const button=event.currentTarget; busy(button, true); try { const result = await api(`/api/strategies/${encodeURIComponent(state.strategy)}`, { method:'PUT', body: JSON.stringify({content: document.querySelector('#strategy-code').value}) }); state.dirty=false; state.dirtyReason=null; notice(result.validation_error ? 'Saved; resolve the validation warning before running.' : 'Strategy saved'); await render(); } catch (error) { notice(error.message, 'error'); busy(button, false); } });
@@ -113,6 +115,26 @@ async function strategies() {
   document.querySelector('#fork')?.addEventListener('click', async () => { if (!confirmDiscard()) return; const name = prompt('New strategy name'); if (!name) return; try { const result = await api(`/api/strategies/${encodeURIComponent(state.strategy)}/fork`, {method:'POST', body: JSON.stringify({name})}); state.strategy = result.name; notice('Strategy forked'); render(); } catch (error) { notice(error.message, 'error'); } });
 }
 async function createStrategy() { if (!confirmDiscard()) return; const name = prompt('Strategy class name (for example EmaCross)'); if (!name) return; try { await api('/api/strategies', {method:'POST', body: JSON.stringify({name})}); state.strategy = name; notice('Strategy created'); render(); } catch (error) { notice(error.message, 'error'); } }
+async function importStrategy(file) {
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = ''; const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    const data = btoa(binary);
+    let result;
+    try { result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify({ data }) }); }
+    catch (error) {
+      if (error.status !== 409) throw error;
+      const choice = prompt('A strategy with that name already exists.\nEnter a different name to import as a copy, or leave blank to overwrite it:');
+      if (choice === null) return;
+      const body = choice.trim() ? { data, name: choice.trim() } : { data, overwrite: true };
+      result = await api('/api/strategies/import', { method: 'POST', body: JSON.stringify(body) });
+    }
+    state.strategy = result.name;
+    notice(result.validation_error ? `Imported ${result.name}; resolve its validation warning before running.` : `Imported ${result.name}`);
+    render();
+  } catch (error) { notice(error.message, 'error'); }
+}
 
 async function candles() {
   const data = await api('/api/candles'); const exchanges = data.exchanges.map(v => `<option>${esc(v)}</option>`).join('');

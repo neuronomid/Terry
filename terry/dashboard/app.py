@@ -6,14 +6,19 @@ implemented here.
 """
 from __future__ import annotations
 
+import base64
 import bisect
 import csv
 import io
+import json
 import math
 import os
 import re
 import secrets
-from datetime import datetime
+import shutil
+import tempfile
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +228,121 @@ class {name}(Strategy):
         qty = utils.size_to_qty(self.available_margin * 0.5, self.price, fee_rate=self.fee_rate)
         self.sell = qty, self.price
 '''
+
+
+_STRATEGY_BUNDLE_VERSION = 1
+_MAX_BUNDLE_BYTES = 8 * 1024 * 1024            # compressed upload cap
+_MAX_BUNDLE_UNCOMPRESSED = 32 * 1024 * 1024    # extracted cap (zip-bomb guard)
+_MAX_BUNDLE_FILES = 400
+_BUNDLE_SKIP_DIRS = {"__pycache__"}
+
+
+def _iter_strategy_files(folder: Path):
+    """Yield (relative_posix_path, absolute_path) for each real file in a strategy
+    folder, skipping caches and compiled artifacts."""
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(folder)
+        if any(part in _BUNDLE_SKIP_DIRS for part in rel.parts):
+            continue
+        if path.suffix in {".pyc", ".pyo"}:
+            continue
+        yield rel.as_posix(), path
+
+
+def _build_strategy_bundle(ctx: TerryContext, name: str) -> bytes:
+    """Zip a strategy folder into a portable bundle: a manifest plus every source
+    file so importing it into another Terry project recreates the strategy in place."""
+    folder = Path(ctx.strategies_dir, name)
+    files = list(_iter_strategy_files(folder))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        manifest = {
+            "terry_strategy_bundle": _STRATEGY_BUNDLE_VERSION,
+            "name": name,
+            "terry_version": __version__,
+            "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "files": [rel for rel, _ in files],
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+        for rel, path in files:
+            archive.write(path, f"files/{rel}")
+    return buffer.getvalue()
+
+
+def _safe_bundle_target(base: Path, rel: str) -> Path:
+    """Resolve a bundle entry under `base`, rejecting absolute paths and traversal."""
+    rel = rel.lstrip("/")
+    if not rel or rel.endswith("/") or "\\" in rel:
+        raise _error(422, "The strategy bundle contains an invalid file path.")
+    base_resolved = base.resolve()
+    candidate = (base / rel).resolve()
+    if candidate != base_resolved and base_resolved not in candidate.parents:
+        raise _error(422, "The strategy bundle contains an unsafe file path.")
+    return candidate
+
+
+def _extract_strategy_bundle(ctx: TerryContext, raw: bytes, name_override: str | None,
+                             overwrite: bool) -> tuple[str, list[str]]:
+    """Validate and unpack a strategy bundle into strategies/<name>/ atomically."""
+    if len(raw) > _MAX_BUNDLE_BYTES:
+        raise _error(422, "The strategy bundle is too large.")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile as exc:
+        raise _error(422, "The uploaded file is not a valid strategy bundle (.zip).") from exc
+    with archive:
+        try:
+            manifest = json.loads(archive.read("manifest.json"))
+        except KeyError as exc:
+            raise _error(422, "The strategy bundle is missing its manifest.json.") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise _error(422, "The strategy bundle manifest is not valid JSON.") from exc
+        if not isinstance(manifest, dict) or "terry_strategy_bundle" not in manifest:
+            raise _error(422, "This file is not a Terry strategy bundle.")
+        original = str(manifest.get("name") or "")
+        name = _require_name(name_override or original)
+        entries = [item for item in archive.infolist()
+                   if not item.is_dir() and item.filename.startswith("files/")
+                   and item.filename != "files/"]
+        if not entries:
+            raise _error(422, "The strategy bundle contains no files.")
+        if len(entries) > _MAX_BUNDLE_FILES:
+            raise _error(422, "The strategy bundle contains too many files.")
+        if sum(item.file_size for item in entries) > _MAX_BUNDLE_UNCOMPRESSED:
+            raise _error(422, "The strategy bundle expands to too much data.")
+        target_dir = Path(ctx.strategies_dir, name)
+        if target_dir.exists() and not overwrite:
+            raise _error(409, f'Strategy "{name}" already exists. Enable overwrite to replace it.',
+                         "exists")
+        # Stage into a temp folder first so a bad archive never leaves a half-written strategy.
+        staging_root = Path(tempfile.mkdtemp(dir=ctx.strategies_dir))
+        written: list[str] = []
+        try:
+            staging_dir = staging_root / "payload"
+            staging_dir.mkdir()
+            for item in entries:
+                dest = _safe_bundle_target(staging_dir, item.filename[len("files/"):])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(item) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                written.append(dest.relative_to(staging_dir).as_posix())
+            init_path = staging_dir / "__init__.py"
+            if not init_path.exists():
+                raise _error(422, "The strategy bundle has no __init__.py entry point.")
+            # Keep folder name and class name consistent when importing under a new name.
+            if name != original and original:
+                text = init_path.read_text(encoding="utf-8")
+                init_path.write_text(
+                    re.sub(rf"class\s+{re.escape(original)}\b", f"class {name}", text, count=1),
+                    encoding="utf-8")
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            os.replace(staging_dir, target_dir)
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+    return name, sorted(written)
 
 
 def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
@@ -579,6 +699,39 @@ def create_app(project_root: str | None = None) -> FastAPI:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source.read_text(encoding="utf-8").replace(f"class {name}", f"class {new_name}", 1), encoding="utf-8")
         return {"status": "forked", "name": new_name, "validation_error": _validation_error(ctx, new_name)}
+
+    @app.get("/api/strategies/{name}/export")
+    def export_strategy(name: str, _: None = Depends(auth)):
+        _require_name(name)
+        if not strategy_exists(ctx.strategies_dir, name):
+            raise _error(404, f'Strategy "{name}" was not found.', "not_found")
+        data = _build_strategy_bundle(ctx, name)
+        return Response(data, media_type="application/zip", headers={
+            "Content-Disposition": f'attachment; filename="{name}.terry-strategy.zip"'})
+
+    @app.post("/api/strategies/import")
+    def import_strategy(payload: dict[str, Any], _: None = Depends(auth)):
+        data_b64 = payload.get("data")
+        if not isinstance(data_b64, str) or not data_b64.strip():
+            raise _error(422, "Provide the strategy bundle as base64 in the 'data' field.")
+        # tolerate a data: URL prefix the browser's FileReader may include
+        if "," in data_b64 and data_b64.strip().startswith("data:"):
+            data_b64 = data_b64.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except ValueError as exc:  # binascii.Error subclasses ValueError
+            raise _error(422, "The strategy bundle could not be decoded.") from exc
+        name_override = payload.get("name")
+        if name_override is not None:
+            if not isinstance(name_override, str):
+                raise _error(422, "name must be text.")
+            name_override = name_override.strip() or None
+        overwrite = payload.get("overwrite", False)
+        if not isinstance(overwrite, bool):
+            raise _error(422, "overwrite must be true or false.")
+        name, files = _extract_strategy_bundle(ctx, raw, name_override, overwrite)
+        return {"status": "imported", "name": name, "files": files,
+                "validation_error": _validation_error(ctx, name)}
 
     @app.delete("/api/strategies/{name}")
     def delete_strategy(name: str, _: None = Depends(auth)):
