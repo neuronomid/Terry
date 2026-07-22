@@ -1,4 +1,4 @@
-const CHART_ASSET_VERSION = '20260721-live-candle-v5';
+const CHART_ASSET_VERSION = '20260721-live-candle-v6';
 let charts = await import(`./charts.js?v=${CHART_ASSET_VERSION}`);
 const app = document.querySelector('#app');
 const toasts = document.querySelector('#toasts');
@@ -341,26 +341,40 @@ async function loadPriceChart(container,s){const price=container.querySelector('
 async function updateLiveDemo(container,s,strategyChanged){const live=(s.results||{}).live||{};container.querySelectorAll('[data-live-price]').forEach(el=>{el.textContent=fmtPrice(live.price);});container.querySelectorAll('[data-live-feed]').forEach(el=>{const wrap=el.closest('.live-price');el.textContent=live.error?'Feed delayed':'Live price';wrap?.classList.toggle('delayed',!!live.error);if(wrap)wrap.title=live.error||'Latest public market tick';});activePriceChart?.updateCandle?.(live.candle);if(!strategyChanged)return;const headline=container.querySelector('[data-headlines]');if(headline)headline.innerHTML=headlineCards(s.results.metrics||{},s.results.benchmark);const account=container.querySelector('[data-demo-account]');if(account)account.innerHTML=paperAccountPanel(s);const trades=container.querySelector('[data-panel="trades"]');if(trades){trades.innerHTML=tradesSection(s.results.trades,s.state.symbol);bindTradeInteractions(trades,s);}if(activePriceChart){try{const data=await api(`/api/session/${s.session_id}/candles?route=${state.chartRoute||0}`);activePriceChart.setMarkers?.(data.markers);activePriceChart.setTradeLines?.(data.trade_lines,tradeLinesVisible);activePriceChart.updateCandle?.(live.candle);}catch(error){notice(error.message,'error');}}}
 async function loadMcChart(container,s,mode){const el=container.querySelector('#mc-chart');if(!el)return;el.innerHTML='<div class="chart-loading">Loading scenarios…</div>';try{const data=await api(`/api/session/${s.session_id}/monte-carlo-curves`);const set=data[mode]||data.candles||data.trades;if(!set||!set.scenarios){el.innerHTML='<p class="muted padded">No equity-curve scenarios were stored for this session.</p>';return;}charts.montecarloChart(el,{original:set.original,scenarios:set.scenarios},{height:360});}catch(error){el.innerHTML=`<p class="muted padded">${esc(error.message)}</p>`;}}
 function startWatch(id){const gen=++watchGen;lastDemoUpdate=null;lastDemoStrategyUpdate=null;liveChartView=null;watchSession(id,gen);}
-async function watchSession(id,gen){if(gen!==watchGen)return;const target=document.querySelector('#active-session');if(!target)return;try{const s=await api(`/api/session/${id}`);if(gen!==watchGen)return;
-  // Demo market ticks update the already-mounted chart series. Rebuilding the report DOM on
-  // every price change would destroy the chart viewport and cause the visible jump users saw.
-  const demoLive=s.kind==='demo'&&(s.status==='running'||s.status==='canceled');
-  const upd=s.results?.live?.tick??s.results?.live?.updated_at??null;
-  const strategyUpd=s.results?.live?.strategy_updated_at??null;
-  const delay=s.kind==='demo'?Math.max(1000,Number(s.results?.live?.poll_seconds||2)*1000):900;
-  if(demoLive&&(s.results||{}).metrics&&lastDemoUpdate!==null&&target.querySelector('.result')){
-    if(upd!==null&&upd!==lastDemoUpdate){const changed=strategyUpd!==lastDemoStrategyUpdate;lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;
-      // Never let a single bad tick stop the loop — the next poll must always be scheduled.
-      try{await updateLiveDemo(target,s,changed);}catch(error){console.error('live demo update failed',error);}}
-    setTimeout(()=>watchSession(id,gen),delay);return;
+async function watchSession(id,gen){
+  if(gen!==watchGen)return;
+  const target=document.querySelector('#active-session');
+  if(!target)return;
+  // keepPolling stays true through any transient fetch/render error so a single blip over a
+  // long-running demo can NEVER permanently freeze the live view (the chart would sit on its
+  // last price for hours while still showing "LIVE"). It only clears on a terminal status.
+  let keepPolling=true, delay=1000;
+  try{
+    const s=await api(`/api/session/${id}`);
+    if(gen!==watchGen)return;
+    // Demo market ticks update the already-mounted chart series. Rebuilding the report DOM on
+    // every price change would destroy the chart viewport and cause the visible jump users saw.
+    const demoLive=s.kind==='demo'&&(s.status==='running'||s.status==='canceled');
+    const upd=s.results?.live?.tick??s.results?.live?.updated_at??null;
+    const strategyUpd=s.results?.live?.strategy_updated_at??null;
+    delay=s.kind==='demo'?Math.max(1000,Number(s.results?.live?.poll_seconds||2)*1000):900;
+    if(demoLive&&(s.results||{}).metrics&&lastDemoUpdate!==null&&target.querySelector('.result')){
+      if(upd!==null&&upd!==lastDemoUpdate){const changed=strategyUpd!==lastDemoStrategyUpdate;lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;
+        // Never let a single bad tick stop the loop — the next poll is always scheduled below.
+        try{await updateLiveDemo(target,s,changed);}catch(error){console.error('live demo update failed',error);}}
+    }else{
+      lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;
+      const prevTab=s.kind==='demo'?target.querySelector('.result-tabs [data-tab].active')?.dataset.tab:null;
+      target.innerHTML=renderSession(s);bindSessionActions(target);charts.disposeCharts();activePriceChart=null;mountSessionCharts(target,s);
+      if(prevTab&&prevTab!=='overview')target.querySelector(`.result-tabs [data-tab="${prevTab}"]`)?.click();
+      if(!(s.status==='running'||demoLive)){keepPolling=false;const done=s.status==='finished';notice(s.kind==='demo'?'Demo stopped — final results saved':(done?'Research finished':s.results?.message||'Research stopped'),done||s.kind==='demo'?'success':'error');if(done)setTimeout(render,0);}
+    }
+  }catch(error){
+    // A transient network/render error must not kill a live loop — log and let it retry.
+    if(gen===watchGen)console.error('watchSession poll failed; retrying',error);
   }
-  lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;
-  const prevTab=s.kind==='demo'?target.querySelector('.result-tabs [data-tab].active')?.dataset.tab:null;
-  target.innerHTML=renderSession(s);bindSessionActions(target);charts.disposeCharts();activePriceChart=null;mountSessionCharts(target,s);
-  if(prevTab&&prevTab!=='overview')target.querySelector(`.result-tabs [data-tab="${prevTab}"]`)?.click();
-  if(s.status==='running'||demoLive){setTimeout(()=>watchSession(id,gen),delay);}
-  else{const done=s.status==='finished';notice(s.kind==='demo'?'Demo stopped — final results saved':(done?'Research finished':s.results?.message||'Research stopped'),done||s.kind==='demo'?'success':'error');if(done)setTimeout(render,0);}
-}catch(error){if(gen===watchGen)notice(error.message,'error');}}
+  if(keepPolling&&gen===watchGen)setTimeout(()=>watchSession(id,gen),delay);
+}
 function bindSessionActions(container=document){container.querySelectorAll('[data-run]').forEach(btn=>btn.addEventListener('click',async()=>{try{state.session=await api(`/api/session/${btn.dataset.run}/run`,{method:'POST'});startWatch(btn.dataset.run);}catch(error){notice(error.message,'error');}}));container.querySelectorAll('[data-cancel]').forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('Cancel this research session?'))return;try{state.session=await api(`/api/session/${btn.dataset.cancel}/cancel`,{method:'POST'});startWatch(btn.dataset.cancel);}catch(error){notice(error.message,'error');}}));container.querySelectorAll('[data-delete-session]').forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('Delete this saved session? This cannot be undone.'))return;try{await api(`/api/session/${btn.dataset.deleteSession}`,{method:'DELETE'});if(state.session?.session_id===btn.dataset.deleteSession)state.session=null;notice('Session deleted');render();}catch(error){notice(error.message,'error');}}));container.querySelectorAll('[data-notes],[data-title]').forEach(input=>input.addEventListener('input',()=>{state.dirty=true;state.dirtyReason='session detail changes';}));container.querySelectorAll('[data-save-notes]').forEach(btn=>btn.addEventListener('click',async()=>{try{const id=btn.dataset.saveNotes;state.session=await api(`/api/session/${id}`,{method:'PATCH',body:JSON.stringify({title:document.querySelector(`[data-title="${id}"]`).value,notes:document.querySelector(`[data-notes="${id}"]`).value})});state.dirty=false;state.dirtyReason=null;notice('Session details saved');await render();}catch(error){notice(error.message,'error');}}));}
 
 async function indicators(){const data=await api('/api/indicators');shell('Indicators',`<div class="split indicators"><aside class="list-panel"><div class="panel-head"><strong>${data.count} indicators</strong></div><input id="indicator-search" name="indicator_search" autocomplete="off" aria-label="Search indicators" placeholder="Search indicators…"><div class="indicator-list">${data.indicators.map(name=>`<button data-indicator="${esc(name)}">${esc(name)}</button>`).join('')}</div></aside><section class="workspace" id="indicator-detail">${empty('Choose an indicator','Select an indicator to see its callable signature and documentation.')}</section></div>`,'All indicators are locally available to strategies and MCP clients.');document.querySelector('#indicator-search').addEventListener('input',event=>{const query=event.target.value.toLowerCase();document.querySelectorAll('[data-indicator]').forEach(row=>row.hidden=!row.textContent.toLowerCase().includes(query));});document.querySelectorAll('[data-indicator]').forEach(button=>button.addEventListener('click',async()=>{try{const d=await api(`/api/indicators/${encodeURIComponent(button.dataset.indicator)}`);document.querySelector('#indicator-detail').innerHTML=`<div class="indicator-doc"><span class="badge">INDICATOR</span><h2>${esc(d.name)}</h2><code>${esc(d.signature)}</code><pre>${esc(d.doc||'No documentation available.')}</pre><div class="callout">Use <code>ta.${esc(d.name)}(self.candles)</code>; add <code>sequential=True</code> when supported for a full series.</div></div>`;}catch(error){notice(error.message,'error');}}));}

@@ -320,8 +320,12 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "activePriceChart?.updateCandle?.(live.candle)" in source
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
     assert "data-live-feed" in source and "Feed delayed" in source
+    # The live-demo poll loop must always reschedule (self-heal transient fetch errors) so a
+    # long-running crypto demo can never freeze permanently on a single blip.
+    assert "let keepPolling=true" in source
+    assert "if(keepPolling&&gen===watchGen)setTimeout(()=>watchSession(id,gen),delay)" in source
     assert "CHART_ASSET_VERSION" in source and "&reload=${Date.now()}" in source
-    assert "app.js?v=20260721-live-candle-v5" in index
+    assert "app.js?v=20260721-live-candle-v6" in index
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
