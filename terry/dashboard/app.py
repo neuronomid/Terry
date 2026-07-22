@@ -1100,8 +1100,11 @@ def create_app(project_root: str | None = None) -> FastAPI:
         finish_ts = (jh.now_to_timestamp(force_fresh=True) if session["kind"] == "demo"
                      else jh.date_to_timestamp(state["finish_date"]))
         raw = ctx.candle_db.get(exchange, symbol, start_ts, finish_ts)
-        from ..engine.candle_store import aggregate_candles
-        agg = aggregate_candles(raw, timeframe)
+        from ..engine.candle_store import aggregate_candles_anchored
+        # Anchor buckets to the window start (the same aligned boundary the engine and the
+        # demo's live forming candle use). Positional aggregation drifts on gappy session-
+        # market feeds, desyncing the last bar from the live candle so it freezes or jumps.
+        agg = aggregate_candles_anchored(raw, timeframe, start_ts)
         step = max(1, len(agg) // 12000 or 1)  # keep the payload lightweight-charts-friendly
         agg = agg[::step]
         candles = [{"time": int(c[0] / 1000), "open": c[1], "high": c[3],

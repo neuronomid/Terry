@@ -47,6 +47,42 @@ def fill_1m_gaps(candles_1m: np.ndarray) -> np.ndarray:
     return out
 
 
+def aggregate_candles_anchored(candles_1m: np.ndarray, timeframe: str,
+                               origin: int) -> np.ndarray:
+    """Aggregate 1m candles into `timeframe` buckets anchored at ``origin`` (ms).
+
+    Each row is grouped by ``floor((ts - origin) / tf_ms)`` and the bucket timestamp is the
+    aligned boundary ``origin + k * tf_ms`` — never the first present row. For a contiguous
+    series that starts at ``origin`` this is identical to :func:`aggregate_candles` (the
+    positional reshape the engine uses), but it stays correct when the 1m feed has gaps.
+
+    Positional reshaping assumes one row per minute; a session market (Forex/metals/indices/
+    stock CFDs) skips every closed minute, so reshaping drifts each bucket's timestamp away
+    from real clock time. That desyncs the chart from the demo's live forming candle — whose
+    time is the true ``floor(minute / tf) * tf`` bucket — making the last bar jump or freeze.
+    Anchoring keeps every bucket on its real boundary so the live candle always lands on it.
+    """
+    tf = jh.timeframe_to_one_minutes(timeframe)
+    if tf == 1 or len(candles_1m) == 0:
+        return candles_1m
+    tf_ms = tf * ONE_MIN_MS
+    arr = np.asarray(candles_1m, dtype=float)
+    ts = arr[:, 0].astype(np.int64)
+    bucket = (ts - int(origin)) // tf_ms
+    # Rows are time-sorted, so bucket ids are non-decreasing and np.unique's first-occurrence
+    # indices come back already ascending — exactly what reduceat needs for per-bucket spans.
+    uniq, first_idx = np.unique(bucket, return_index=True)
+    last_idx = np.append(first_idx[1:] - 1, len(arr) - 1)
+    out = np.empty((len(uniq), 6))
+    out[:, 0] = int(origin) + uniq * tf_ms          # aligned boundary, gap-proof
+    out[:, 1] = arr[first_idx, 1]                    # open  = first present open
+    out[:, 2] = arr[last_idx, 2]                     # close = last present close
+    out[:, 3] = np.maximum.reduceat(arr[:, 3], first_idx)  # high
+    out[:, 4] = np.minimum.reduceat(arr[:, 4], first_idx)  # low
+    out[:, 5] = np.add.reduceat(arr[:, 5], first_idx)      # volume
+    return out
+
+
 def aggregate_candles(candles_1m: np.ndarray, timeframe: str) -> np.ndarray:
     """Aggregate a 1m candle array into `timeframe` candles (full array, non-causal)."""
     tf = jh.timeframe_to_one_minutes(timeframe)

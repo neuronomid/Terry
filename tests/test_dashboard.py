@@ -321,7 +321,7 @@ def test_dashboard_static_regressions_cover_accessibility_and_result_keys():
     assert "data-trade-lines" in source and "setTradeLinesVisible" in source
     assert "data-live-feed" in source and "Feed delayed" in source
     assert "CHART_ASSET_VERSION" in source and "&reload=${Date.now()}" in source
-    assert "app.js?v=20260721-live-candle-v4" in index
+    assert "app.js?v=20260721-live-candle-v5" in index
     assert "const TRADE_SORTS" in source and "defaultDirection:'desc'" in source
     assert "tradeSort={key:'entry',direction:'desc'}" in source
     assert ".trade-sort-popover" in styles and ".dotted-swatch" in styles
@@ -465,6 +465,60 @@ controller.updateCandle({ time: 3, open: 13, high: 15, low: 12, close: 14, volum
 controller.updateCandle({ time: 4, open: 14, high: 16, low: 13, close: 15, volume: 2 });
 if (rangeCalls.length !== afterScroll)
   throw new Error('a scrolled-away viewport was yanked back by live updates');
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "-e", script,
+         str(Path("terry/dashboard/static/charts.js").resolve())],
+        check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_live_update_survives_a_rejected_or_backwards_candle():
+    """A stale/backwards candle (or a series that rejects it) must never throw out of
+    updateCandle — otherwise one bad tick freezes every future update for that symbol."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the dashboard module contract test")
+    script = r"""
+import fs from 'node:fs';
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const charts = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+let lastTime = null;
+const candleSeries = {
+  setData() {}, setMarkers() {}, createPriceLine() {}, applyOptions() {},
+  update(d) {
+    // Mimic Lightweight Charts: reject any update older than the last accepted bar.
+    if (lastTime !== null && d.time < lastTime) throw new Error('Cannot update oldest data');
+    lastTime = d.time;
+  },
+};
+const makeSeries = () => ({ setData() {}, update() {}, setMarkers() {}, createPriceLine() {}, applyOptions() {} });
+const timeScale = { fitContent() {}, setVisibleLogicalRange() {}, subscribeVisibleLogicalRangeChange() {} };
+let candleMade = false;
+const nativeChart = {
+  addCandlestickSeries() { candleMade = true; return candleSeries; },
+  addHistogramSeries() { return makeSeries(); },
+  addLineSeries() { return makeSeries(); },
+  priceScale() { return { applyOptions() {} }; },
+  timeScale() { return timeScale; },
+  removeSeries() {}, remove() {},
+};
+globalThis.window = { LightweightCharts: { LineStyle: { Dashed: 2, Dotted: 1 }, createChart() { return nativeChart; } } };
+globalThis.document = { body: { classList: { contains() { return false; } } } };
+const controller = charts.priceChart(
+  { innerHTML: '', clientHeight: 460 },
+  { candles: [{ time: 100, open: 10, high: 12, low: 9, close: 11, volume: 5 }] },
+  { live: true },
+);
+if (!candleMade) throw new Error('candle series was not created');
+// Forward tick in the same bucket — accepted.
+controller.updateCandle({ time: 100, open: 10, high: 13, low: 9, close: 12, volume: 6 });
+// A backwards candle must be swallowed, not thrown.
+controller.updateCandle({ time: 40, open: 1, high: 2, low: 1, close: 2, volume: 1 });
+// A brand-new forward bar must still be accepted afterwards (loop stayed alive).
+controller.updateCandle({ time: 160, open: 12, high: 14, low: 11, close: 13, volume: 4 });
+if (lastTime !== 160) throw new Error('a valid new bar was lost after a backwards tick');
 """
     completed = subprocess.run(
         [node, "--input-type=module", "-e", script,
@@ -698,6 +752,84 @@ def test_trade_connectors_keep_exact_times_and_cover_every_displayed_trade(tmp_p
     assert lines[0]["open_time"] == int((start + 10 * 60_000) / 1000)
     assert lines[0]["close_time"] == int((start + 20 * 60_000) / 1000)
     assert lines[0]["open_time"] != lines[0]["close_time"]
+
+
+def test_anchored_aggregation_matches_positional_but_survives_gaps():
+    """Anchored buckets equal the engine's positional reshape for contiguous data, and stay
+    epoch-aligned when a session-market feed skips closed minutes."""
+    from terry.engine.candle_store import aggregate_candles, aggregate_candles_anchored
+    origin = jh.date_to_timestamp("2024-01-08")  # Monday midnight — aligned to every intraday tf
+    for timeframe in ("5m", "15m", "45m", "1h", "4h"):
+        tf_ms = jh.timeframe_to_one_minutes(timeframe) * 60_000
+        ts = np.arange(origin, origin + 3 * 86_400_000, 60_000)
+        prices = 100 + np.sin(np.arange(len(ts)) / 40.0)
+        contiguous = np.column_stack(
+            [ts, prices, prices + 0.05, prices + 0.2, prices - 0.2, np.ones(len(ts))])
+        positional = aggregate_candles(contiguous, timeframe)
+        anchored = aggregate_candles_anchored(contiguous, timeframe, origin)
+        common = min(len(positional), len(anchored))
+        assert np.allclose(positional[:common], anchored[:common]), timeframe
+        assert np.all((anchored[:, 0].astype(np.int64) - origin) % tf_ms == 0), timeframe
+
+    # Gappy session-market minutes (≈40% dropped) must never drift a bucket off its boundary.
+    rng = np.random.default_rng(11)
+    ts = np.arange(origin, origin + 2 * 86_400_000, 60_000)
+    keep = rng.random(len(ts)) > 0.40
+    gts = ts[keep]
+    px = 1.10 + np.cumsum(rng.normal(0, 0.0002, len(gts)))
+    gappy = np.column_stack([gts, px, px + 1e-4, px + 2e-4, px - 2e-4, np.ones(len(gts))])
+    tf_ms = jh.timeframe_to_one_minutes("1h") * 60_000
+    anchored = aggregate_candles_anchored(gappy, "1h", origin)
+    times = anchored[:, 0].astype(np.int64)
+    assert np.all((times - origin) % tf_ms == 0)          # every bar on its real boundary
+    assert np.all(np.diff(times) == tf_ms) or np.all(np.diff(times) > 0)  # strictly increasing
+
+
+def test_demo_chart_endpoint_aligns_gappy_session_market_to_live_candle(
+        tmp_path: Path, monkeypatch):
+    """A gappy Forex feed must aggregate onto timeframe boundaries so the demo's live forming
+    candle lands on the last bar instead of a drifted one — the cause of the frozen/jumping
+    chart for non-crypto symbols. Reproduces the bug and locks in the fix."""
+    client = TestClient(create_app(str(tmp_path)))
+    ctx = get_context()
+    exchange, symbol, timeframe = "Dukascopy", "EUR-USD", "1h"
+    tf_ms = jh.timeframe_to_one_minutes(timeframe) * 60_000
+    start = jh.date_to_timestamp("2024-01-08")  # aligned window start (as the runner computes)
+
+    # Four hours of 1m candles with irregular gaps (every session market skips closed minutes),
+    # keeping at least a few real minutes in each hour including the still-forming one.
+    rng = np.random.default_rng(3)
+    rows = []
+    for minute in range(4 * 60):
+        ts = start + minute * 60_000
+        if minute % 60 < 5 or rng.random() > 0.45:  # always seed the first minutes of each hour
+            price = 1.10 + minute * 0.0001
+            rows.append([ts, price, price, price + 0.0002, price - 0.0002, 1.0])
+    ctx.candle_db.store(exchange, symbol, rows)
+
+    now = start + 3 * tf_ms + 30 * 60_000       # halfway through the 4th (forming) hour
+    monkeypatch.setattr(jh, "now_to_timestamp", lambda force_fresh=False: now)
+    current_bucket = now // tf_ms * tf_ms
+    live_candle = {"time": int(current_bucket / 1000), "open": 1.1180,
+                   "close": 1.1195, "high": 1.1200, "low": 1.1175, "volume": 0.0}
+    state = {"exchange": exchange, "symbol": symbol, "timeframe": timeframe,
+             "strategy": "DashboardTrade", "start_date": "2024-01-08",
+             "finish_date": "2024-01-09"}
+    sid = ctx.sessions.create("demo", state)
+    ctx.sessions.set_results(sid, {"trades": [], "live": {
+        "is_live": True, "window_start_ts": start, "window_end_ts": current_bucket,
+        "updated_at": now, "candle": live_candle}}, status="running")
+
+    candles = client.get(f"/api/session/{sid}/candles").json()["candles"]
+    assert candles, "gappy session market produced no chart candles"
+    times_ms = [int(c["time"]) * 1000 for c in candles]
+    # Every bar sits exactly on a timeframe boundary — no positional drift.
+    assert all((t - start) % tf_ms == 0 for t in times_ms)
+    # Strictly increasing, so Lightweight Charts' update() never rejects the live candle.
+    assert all(b > a for a, b in zip(times_ms, times_ms[1:]))
+    # The live forming candle merges onto the last (aligned) bar rather than a drifted one.
+    assert candles[-1] == live_candle
+    assert times_ms[-1] == current_bucket
 
 
 def test_demo_loop_publishes_each_market_tick_and_surfaces_feed_errors(

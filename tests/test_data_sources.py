@@ -169,6 +169,28 @@ def test_yahoo_fetch_live_price_reads_meta_then_none(monkeypatch):
     assert yahoo.fetch_live_price("EUR-USD") is None
 
 
+def test_yahoo_live_price_prefers_precise_1m_close_over_rounded_meta(monkeypatch):
+    """Yahoo rounds meta.regularMarketPrice (hiding sub-pip FX moves); the fresher, full-
+    precision 1m close must win so the live forming candle keeps moving tick by tick."""
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"chart": {"result": [{
+                "meta": {"regularMarketPrice": 1.141, "regularMarketTime": 1000},
+                "timestamp": [940, 1000, 1060],
+                "indicators": {"quote": [{"close": [1.1408, 1.14103, None]}]},
+            }]}}
+
+    class _Session:
+        def get(self, url, params=None, timeout=None):
+            return _Resp()
+
+    monkeypatch.setattr(yahoo, "_session", lambda: _Session())
+    # Newest non-null close is 1.14103 at t=1000 (ties the meta time) — precise value wins.
+    assert yahoo.fetch_live_price("EUR-USD") == 1.14103
+
+
 # --------------------------------------------------------------------------- sessions
 def test_forex_market_open_and_close_boundaries():
     # Monday 13:00 UTC — open, London + New York overlap.

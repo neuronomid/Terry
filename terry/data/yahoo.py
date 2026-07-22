@@ -101,10 +101,14 @@ def fetch_1m_range(symbol, start_ts, finish_ts, on_progress=None,
 
 
 def fetch_live_price(symbol):
-    """Real-time last price from the chart ``meta``, or ``None`` on any failure.
+    """Real-time last price for the live forming candle, or ``None`` on any failure.
 
-    Returns ``None`` when the market is closed or a request fails so the demo loop
-    holds its last good price instead of stalling.
+    Prefers the full-precision close of the newest 1-minute bar over the meta
+    ``regularMarketPrice``. Yahoo rounds that meta price (e.g. EUR/USD ``1.1410315`` is
+    reported as ``1.141``), which flattens sub-pip FX moves and makes the forming candle
+    look frozen even as the market ticks. Whichever reading carries the most recent
+    timestamp wins; the precise 1m close breaks ties. Returns ``None`` when the market is
+    closed or a request fails so the demo loop holds its last good price instead of stalling.
     """
     try:
         session = _session()
@@ -116,7 +120,27 @@ def fetch_live_price(symbol):
         result = ((response.json().get("chart") or {}).get("result") or [None])[0]
         if not result:
             return None
-        price = (result.get("meta") or {}).get("regularMarketPrice")
-        return float(price) if price is not None else None
+        meta = result.get("meta") or {}
+        timestamps = result.get("timestamp") or []
+        closes = ((result.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+        # Newest non-null 1m close (full precision).
+        close_price = close_time = None
+        for i in range(len(closes) - 1, -1, -1):
+            if closes[i] is not None:
+                close_price = closes[i]
+                close_time = timestamps[i] if i < len(timestamps) else None
+                break
+        # (timestamp, precision_rank, value): rank breaks ties toward the precise 1m close.
+        candidates = []
+        if close_price is not None:
+            candidates.append((close_time if close_time is not None else -1, 1, close_price))
+        market_price = meta.get("regularMarketPrice")
+        if market_price is not None:
+            market_time = meta.get("regularMarketTime")
+            candidates.append((market_time if market_time is not None else -1, 0, market_price))
+        if not candidates:
+            return None
+        candidates.sort()
+        return float(candidates[-1][2])
     except Exception:
         return None

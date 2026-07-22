@@ -1,4 +1,4 @@
-const CHART_ASSET_VERSION = '20260721-live-candle-v4';
+const CHART_ASSET_VERSION = '20260721-live-candle-v5';
 let charts = await import(`./charts.js?v=${CHART_ASSET_VERSION}`);
 const app = document.querySelector('#app');
 const toasts = document.querySelector('#toasts');
@@ -349,7 +349,9 @@ async function watchSession(id,gen){if(gen!==watchGen)return;const target=docume
   const strategyUpd=s.results?.live?.strategy_updated_at??null;
   const delay=s.kind==='demo'?Math.max(1000,Number(s.results?.live?.poll_seconds||2)*1000):900;
   if(demoLive&&(s.results||{}).metrics&&lastDemoUpdate!==null&&target.querySelector('.result')){
-    if(upd!==null&&upd!==lastDemoUpdate){const changed=strategyUpd!==lastDemoStrategyUpdate;lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;await updateLiveDemo(target,s,changed);}
+    if(upd!==null&&upd!==lastDemoUpdate){const changed=strategyUpd!==lastDemoStrategyUpdate;lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;
+      // Never let a single bad tick stop the loop — the next poll must always be scheduled.
+      try{await updateLiveDemo(target,s,changed);}catch(error){console.error('live demo update failed',error);}}
     setTimeout(()=>watchSession(id,gen),delay);return;
   }
   lastDemoUpdate=upd;lastDemoStrategyUpdate=strategyUpd;state.session=s;

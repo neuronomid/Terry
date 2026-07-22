@@ -183,13 +183,20 @@ export function priceChart(el, data, { extraEl, live, view, onView } = {}) {
   return Object.assign(chart, {
     updateCandle(candle) {
       if (!candle || !Number.isFinite(Number(candle.time))) return;
-      const next = { time: candle.time, open: candle.open, high: candle.high,
+      const time = Number(candle.time);
+      // Lightweight Charts rejects an update whose time predates the last bar. That can only
+      // happen if a feed hiccup hands back a stale bucket; swallow it so one bad tick never
+      // throws out of the polling loop and freezes every future update for this symbol.
+      if (lastCandleTime != null && time < lastCandleTime) return;
+      const next = { time, open: candle.open, high: candle.high,
         low: candle.low, close: candle.close };
-      const isNew = lastCandleTime == null || candle.time > lastCandleTime;
-      candleSeries.update(next);
-      volSeries.update({ time: candle.time, value: candle.volume,
-        color: candle.close >= candle.open ? p.volUp : p.volDown });
-      if (isNew) { barCount += 1; lastCandleTime = candle.time; }
+      const isNew = lastCandleTime == null || time > lastCandleTime;
+      try {
+        candleSeries.update(next);
+        volSeries.update({ time, value: candle.volume,
+          color: candle.close >= candle.open ? p.volUp : p.volDown });
+      } catch (_) { return; }
+      if (isNew) { barCount += 1; lastCandleTime = time; }
       for (const item of tradeLineSeries) {
         if (!item.line.is_open) continue;
         const openTime = Number(item.line.open_time);
