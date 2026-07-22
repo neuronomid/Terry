@@ -124,6 +124,23 @@ def _symbol(value: Any) -> str:
     return symbol
 
 
+def _validate_market_symbol(exchange: str, symbol: str) -> None:
+    """Reject a session-market symbol Terry cannot resolve to a real feed.
+
+    Forex/metals/energy/indices/stock CFDs (Dukascopy) are only tradeable if they map to a
+    registered instrument — that mapping supplies the Dukascopy code, price scale and Yahoo
+    live ticker. Without it the demo would spin forever ``Connecting to the live market…``
+    while Yahoo 404s the fabricated ``EURUSD``-style ticker. Fail fast with the supported list
+    instead. Crypto exchanges accept any well-formed pair (the venue validates it on fetch).
+    """
+    from ..data.binance import is_session_market
+    from ..data import instruments
+    if is_session_market(exchange) and not instruments.is_registered(symbol):
+        supported = ", ".join(e["symbol"] for e in instruments._ENTRIES)
+        raise _error(422, f"'{symbol}' is not a supported {exchange} instrument. "
+                          f"Supported symbols: {supported}.")
+
+
 def _timeframe(value: Any) -> str:
     timeframe = str(value or "4h")
     try:
@@ -159,6 +176,7 @@ def _routes(ctx: TerryContext, value: Any, exchange: str, *, trading: bool) -> l
             "symbol": _symbol(route["symbol"]),
             "timeframe": _timeframe(route["timeframe"]),
         }
+        _validate_market_symbol(route_exchange, normalized["symbol"])
         if trading:
             strategy = _require_name(str(route["strategy"]))
             if not strategy_exists(ctx.strategies_dir, strategy):
@@ -502,6 +520,7 @@ def _base_state(ctx: TerryContext, payload: dict[str, Any]) -> dict[str, Any]:
         if not strategy_exists(ctx.strategies_dir, strategy):
             raise _error(404, f'Strategy "{strategy}" does not exist.', "strategy_not_found")
         symbol = _symbol(payload.get("symbol"))
+        _validate_market_symbol(exchange, symbol)
         timeframe = _timeframe(payload.get("timeframe", "4h"))
     start_date = _date(payload.get("start_date"), "start_date")
     finish_date = _date(payload.get("finish_date"), "finish_date")
@@ -871,6 +890,7 @@ def create_app(project_root: str | None = None) -> FastAPI:
         if exchange not in EXCHANGES:
             raise _error(422, f"Unknown exchange: {exchange}.")
         symbol = _symbol(payload.get("symbol"))
+        _validate_market_symbol(exchange, symbol)
         start = _date(payload.get("start_date"), "start_date")
         finish = payload.get("finish_date")
         if finish:

@@ -11,6 +11,8 @@ the multi-year historical backfill (that is Dukascopy's job).
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import requests
 
@@ -18,7 +20,11 @@ from . import instruments
 
 ONE_MIN_MS = 60_000
 SEVEN_DAYS_MS = 7 * 86_400_000
-_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+# Yahoo serves the same v8 chart from two hosts; one often rate-limits (HTTP 429) or 404s
+# transiently while the other answers, so every request tries both before giving up.
+_CHART_HOSTS = ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com")
+_CHART_PATH = "/v8/finance/chart/{ticker}"
+_CHART_URL = _CHART_HOSTS[0] + _CHART_PATH  # retained for backward compatibility
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Terry live demo)"}
 
 
@@ -36,6 +42,39 @@ def _session():
     return session
 
 
+def _chart_request(session, ticker, params, timeout=15, retries=2):
+    """Fetch a Yahoo v8 chart ``result`` object, or ``None`` when every attempt fails.
+
+    Tries query1 then query2 and retries transient failures (network errors, 429, 5xx) with
+    a short backoff. Returns ``None`` — never raises — for a missing ticker, a persistent
+    rate-limit, or a market with no data, so a demo's live tail degrades gracefully instead
+    of crashing the run.
+    """
+    for attempt in range(retries):
+        transient = False
+        for host in _CHART_HOSTS:
+            url = host + _CHART_PATH.format(ticker=ticker)
+            try:
+                response = session.get(url, params=params, timeout=timeout)
+            except requests.RequestException:
+                transient = True
+                continue
+            code = getattr(response, "status_code", 0)
+            if code // 100 == 2:
+                try:
+                    result = (response.json().get("chart") or {}).get("result") or []
+                except ValueError:
+                    return None
+                return result[0] if result else None
+            if code == 429 or code // 100 == 5:
+                transient = True  # worth a backoff retry on the other host / next round
+            # 404 (unknown ticker) just falls through to try the other host, then stops.
+        if not transient or attempt == retries - 1:
+            break
+        time.sleep(0.4 * (attempt + 1))
+    return None
+
+
 def _fetch_chart(ticker, start_ts, finish_ts, session):
     # Yahoo caps 1m history at ~7 days; clamp the window so period1 is never rejected.
     finish_ts = int(finish_ts)
@@ -46,14 +85,7 @@ def _fetch_chart(ticker, start_ts, finish_ts, session):
         "period2": finish_ts // 1000 + 60,
         "includePrePost": "true",
     }
-    response = session.get(_CHART_URL.format(ticker=ticker), params=params, timeout=30)
-    if response.status_code // 100 != 2:
-        raise RuntimeError(f"Yahoo chart error {response.status_code} for {ticker}")
-    payload = response.json()
-    result = (payload.get("chart") or {}).get("result") or []
-    if not result:
-        return None
-    return result[0]
+    return _chart_request(session, ticker, params, timeout=30)
 
 
 def fetch_1m_range(symbol, start_ts, finish_ts, on_progress=None,
@@ -113,11 +145,7 @@ def fetch_live_price(symbol):
     try:
         session = _session()
         params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
-        response = session.get(_CHART_URL.format(ticker=_ticker(symbol)),
-                               params=params, timeout=10)
-        if response.status_code // 100 != 2:
-            return None
-        result = ((response.json().get("chart") or {}).get("result") or [None])[0]
+        result = _chart_request(session, _ticker(symbol), params, timeout=10)
         if not result:
             return None
         meta = result.get("meta") or {}

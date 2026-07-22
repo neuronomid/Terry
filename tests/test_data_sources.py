@@ -9,6 +9,7 @@ import struct
 
 import numpy as np
 import pytest
+import requests
 
 import terry.helpers as jh
 from terry.data import binance, dukascopy, instruments, market_hours, yahoo
@@ -189,6 +190,45 @@ def test_yahoo_live_price_prefers_precise_1m_close_over_rounded_meta(monkeypatch
     monkeypatch.setattr(yahoo, "_session", lambda: _Session())
     # Newest non-null close is 1.14103 at t=1000 (ties the meta time) — precise value wins.
     assert yahoo.fetch_live_price("EUR-USD") == 1.14103
+
+
+def test_yahoo_chart_request_falls_back_to_second_host_and_never_raises():
+    """query1 rate-limiting (429) must transparently fail over to query2; a ticker both hosts
+    404 returns None instead of raising, so a demo's live tail degrades rather than crashes."""
+    class _Resp:
+        def __init__(self, code, payload=None):
+            self.status_code = code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    good = {"chart": {"result": [{"meta": {"regularMarketPrice": 9.99}}]}}
+
+    class _FailoverSession:
+        calls = []
+
+        def get(self, url, params=None, timeout=None):
+            _FailoverSession.calls.append(url)
+            return _Resp(200, good) if "query2" in url else _Resp(429)
+
+    session = _FailoverSession()
+    result = yahoo._chart_request(session, "EURUSD=X", {"interval": "1m"})
+    assert result == {"meta": {"regularMarketPrice": 9.99}}
+    assert any("query1" in u for u in session.calls) and any("query2" in u for u in session.calls)
+
+    class _AllNotFound:
+        def get(self, url, params=None, timeout=None):
+            return _Resp(404, {"chart": {"result": None, "error": {"code": "Not Found"}}})
+
+    # Both hosts 404 → graceful None, no exception (fetch_1m_range then yields no candles).
+    assert yahoo._chart_request(_AllNotFound(), "BOGUS", {"interval": "1m"}) is None
+
+    class _NetworkDown:
+        def get(self, url, params=None, timeout=None):
+            raise requests.RequestException("connection reset")
+
+    assert yahoo._chart_request(_NetworkDown(), "EURUSD=X", {"interval": "1m"}) is None
 
 
 # --------------------------------------------------------------------------- sessions

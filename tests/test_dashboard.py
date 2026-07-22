@@ -893,6 +893,67 @@ def test_demo_loop_publishes_each_market_tick_and_surfaces_feed_errors(
     assert published[-1]["error"] == "RuntimeError: temporary market feed failure"
 
 
+def test_session_market_symbol_must_be_a_registered_instrument(tmp_path: Path):
+    """A Dukascopy demo/backtest/import for an unknown symbol must fail fast with the
+    supported list — not spin 'Connecting to the live market…' while Yahoo 404s a
+    fabricated ticker (the EURO-USD vs EUR-USD trap)."""
+    client = TestClient(create_app(str(tmp_path)))
+    assert client.post("/api/strategies", json={
+        "name": "DashboardTrade", "content": STRATEGY}).status_code == 200
+
+    def demo(symbol):
+        return client.post("/api/sessions/demo", json={
+            "strategy": "DashboardTrade", "exchange": "Dukascopy", "symbol": symbol,
+            "timeframe": "5m", "lookback_days": 2, "start": False})
+
+    bad = demo("EURO-USD")
+    assert bad.status_code == 422
+    assert "not a supported Dukascopy instrument" in bad.json()["message"]
+    assert "EUR-USD" in bad.json()["message"]           # lists the real supported symbols
+    assert demo("EUR-USD").status_code == 200            # the registered symbol is accepted
+
+    # The import endpoint guards the same way, before a doomed background job starts.
+    imp = client.post("/api/candles/import", json={
+        "exchange": "Dukascopy", "symbol": "EURO-USD", "start_date": "2024-01-01"})
+    assert imp.status_code == 422
+    assert "not a supported Dukascopy instrument" in imp.json()["message"]
+
+    # Crypto venues stay permissive — the exchange validates the pair on fetch.
+    assert client.post("/api/sessions/demo", json={
+        "strategy": "DashboardTrade", "exchange": "Binance Perpetual Futures",
+        "symbol": "WILD-USDT", "timeframe": "5m", "lookback_days": 1,
+        "start": False}).status_code == 200
+
+
+def test_demo_stops_after_persistent_startup_failure(tmp_path: Path, monkeypatch):
+    """A demo whose feed never yields a first window (dead/blocked source) must stop with the
+    error after a few tries — never spin the connecting spinner forever."""
+    ctx = TerryContext(str(tmp_path))
+    state = {
+        "exchange": "Binance Perpetual Futures", "symbol": "BTC-USDT",
+        "timeframe": "1m", "strategy": "X", "lookback_days": 1,
+        "start_date": "2024-01-01", "finish_date": "2024-01-02",
+    }
+    sid = ctx.sessions.create("demo", state)
+
+    def dead_feed(*_args, **_kwargs):
+        raise RuntimeError("HTTP 451 (geo-restricted)")
+
+    monkeypatch.setattr(ctx.runner, "_refresh_live_candles", dead_feed)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    ctx.runner._run_demo_live(sid, state)
+
+    session = ctx.sessions.get(sid)
+    results = session.get("results") or {}
+    assert session["status"] == "finished"              # terminal, not an endless 'running'
+    assert results["message"] == "RuntimeError: HTTP 451 (geo-restricted)"
+    assert not results.get("metrics")                   # never produced a window
+    assert results["live"]["is_live"] is False
+    # Gave up at exactly the startup limit rather than looping forever.
+    assert results["live"]["tick"] == ctx.runner._DEMO_STARTUP_ERROR_LIMIT
+
+
 def test_dashboard_backtest_runs_and_exports_end_to_end(tmp_path: Path):
     _seed_candles(tmp_path)
     client = TestClient(create_app(str(tmp_path)))

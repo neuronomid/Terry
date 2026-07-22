@@ -44,6 +44,10 @@ class MissingCandles(Exception):
 
 
 class Runner:
+    # Consecutive first-window failures a live demo tolerates before it stops with the error
+    # instead of retrying a doomed feed forever.
+    _DEMO_STARTUP_ERROR_LIMIT = 3
+
     def __init__(self, ctx):
         self.ctx = ctx
         self._threads = {}
@@ -286,6 +290,10 @@ class Runner:
         last_strategy_update = None
         last_live_price = None
         live_tick = 0
+        # A demo that never produced a first window (bad symbol, geo-blocked venue, dead feed)
+        # must not spin "Connecting to the live market…" forever. Give up after a few
+        # consecutive startup failures and surface the error as a stopped session.
+        startup_errors = 0
         while sid not in self._canceled:
             try:
                 now_ts = jh.now_to_timestamp(force_fresh=True)
@@ -346,6 +354,7 @@ class Runner:
                     output["live"]["session"] = market_hours.session_info(now_ts)
                 self.ctx.sessions.set_results(sid, output, status="running")
                 produced = True
+                startup_errors = 0
             except InterruptedError:
                 break
             except Exception as exc:  # keep the live session alive across transient errors
@@ -363,6 +372,13 @@ class Runner:
                     "poll_seconds": poll_seconds, "tick": live_tick,
                 }
                 self.ctx.sessions.set_results(sid, output, status="running")
+                # Once trading has begun, a hiccup is transient — keep the session alive. But if
+                # the very first window never succeeded, the feed is unusable for this run; stop
+                # so the user sees the error instead of an endless connecting spinner.
+                if not produced:
+                    startup_errors += 1
+                    if startup_errors >= self._DEMO_STARTUP_ERROR_LIMIT:
+                        break
             for _ in range(max(1, poll_seconds)):
                 if sid in self._canceled:
                     break
