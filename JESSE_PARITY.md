@@ -54,6 +54,13 @@ A source-level review of Terry's four research backends against the current
   **Fixed:** each signal is scored against the *following* bar's return. It was
   paired with the return that preceded it, which leaked look-ahead information and
   returned `p = 0` for rules with no predictive power whatsoever.
+  **Deliberate divergence:** `annualized_return` scales `observed_mean` by *bars* per
+  year (`365 × 1440 / timeframe_minutes`, also reported as `bars_per_year`), not by
+  365. `observed_mean` is a per-bar quantity, so a flat 365 is only right on a `1D`
+  route and understates a `4h` route — Terry's own default — by 6×. Matching Jesse's
+  constant while computing a different quantity is not parity. It stays a log return
+  rather than a compounded percentage on purpose: annualizing a bar-level bootstrap
+  mean already assumes frictionless trading on every bar.
 
 ## Capability matrix
 

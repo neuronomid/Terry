@@ -67,8 +67,10 @@ Significance test: create_significance_test_draft(exchange, routes, data_routes,
 finish_date, n_simulations, random_seed, title, description, strategy_summary, hypothesis,
 rationale, plus Terry shorthand strategy/symbol/timeframe/config and cpu_cores),
 run_significance_test(session_id*), get_significance_test_session(session_id*)
-(-> results.results = {observed_mean, annualized_return, p_value, n_simulations, n_observations,
-significant, verdict}), plus get_significance_test_sessions / update_significance_test_draft /
+(-> results.results = {observed_mean, annualized_return, bars_per_year, p_value, n_simulations,
+n_observations, significant, verdict}; observed_mean is per bar and annualized_return is a log
+return scaled by bars_per_year, not a compounded percentage), plus
+get_significance_test_sessions / update_significance_test_draft /
 update_significance_test_notes / cancel_significance_test / purge_significance_test_sessions.
 Interpret p_value: <0.05 significant; 0.05-0.10 borderline; >0.10 hard stop (random).
 

@@ -20,12 +20,14 @@ def _stat(value):
     """Render one significance-test statistic at a sane precision.
 
     ``bool`` is a subclass of ``int``, so it is checked first — "significant: 1.00"
-    reads as a score rather than the verdict flag it is. Counts stay whole; the
-    p-value and mean bar return need six decimals to be readable at all.
+    reads as a score rather than the verdict flag it is. Counts stay whole (including
+    float-typed ones like ``bars_per_year``); the p-value and mean bar return need six
+    decimals to be readable at all.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return html.escape(str(value))
-    return _fmt(value, 0 if isinstance(value, int) else 6)
+    whole = isinstance(value, int) or float(value).is_integer()
+    return _fmt(value, 0 if whole else 6)
 
 
 def _metrics_table(metrics):

@@ -15,12 +15,14 @@ import os
 
 import numpy as np
 
+from .. import helpers as jh
 from .backtest import backtest
 from ._workers import parallel_results, resolve_workers
 
 # Crypto markets trade 24/7, so Jesse annualizes over 365 days (see
 # jesse/research/rule_significance_testing/common.py). Keep this in lockstep.
 TRADING_DAYS_PER_YEAR = 365
+MINUTES_PER_DAY = 1_440
 MIN_OBSERVATIONS = 30
 
 
@@ -67,10 +69,18 @@ def rule_significance_test(config, routes, data_routes, candles, warmup_candles=
                            progress_bar=progress_bar, progress_callback=progress_callback,
                            should_cancel=should_cancel, cpu_cores=cpu_cores)
     p_value = float(np.mean(sim_means >= observed_mean)) if len(sim_means) else 1.0
+    bars_per_year = _bars_per_year(routes[0]["timeframe"])
 
     return {
         "observed_mean": observed_mean,
-        "annualized_return": observed_mean * TRADING_DAYS_PER_YEAR,
+        # ``observed_mean`` is per *bar*, so the scale factor is bars per year, not
+        # days per year — a 4h route compounds 2,190 bars, not 365. Deliberately left
+        # in log space and reported alongside its multiplier: annualizing a bar-level
+        # bootstrap mean already assumes the rule trades every bar with no fees,
+        # slippage, or capacity limit, and compounding it into a headline percentage
+        # turns a tiny per-bar edge into a four-digit number on fast timeframes.
+        "annualized_return": observed_mean * bars_per_year,
+        "bars_per_year": bars_per_year,
         "simulated_means": sim_means,
         "p_value": p_value,
         "n_simulations": int(len(sim_means)),
@@ -125,6 +135,11 @@ def _bootstrap(rule_returns, observed_mean, n_simulations, random_seed,
     return means
 
 
+def _bars_per_year(timeframe):
+    """How many candles of ``timeframe`` a 24/7 year contains."""
+    return TRADING_DAYS_PER_YEAR * MINUTES_PER_DAY / jh.timeframe_to_one_minutes(timeframe)
+
+
 def _verdict(p):
     if p < 0.05:
         return "significant"       # genuine edge — proceed
@@ -173,9 +188,12 @@ def plot_significance_test(result: dict, charts_folder: str = None,
             patch.set_alpha(0.9)
     axis.axvline(observed, color=colors["line"], linewidth=1.8, linestyle="--",
                  label=f"Observed mean = {observed:.6f}")
+    # Reported as a log return, not "× 100 %": the value is an extrapolation of a
+    # per-bar mean, and dressing it up as a percentage reads as an achievable return.
     info = (
         f"p-value = {float(result['p_value']):.4f}\n"
-        f"Annualised return = {float(result['annualized_return']) * 100:.4f} %\n"
+        f"Annualised log return = {float(result['annualized_return']):.4f}"
+        f" over {float(result.get('bars_per_year') or 0):,.0f} bars/yr\n"
         f"Observations = {result['n_observations']} bars   |   "
         f"Simulations = {result['n_simulations']}"
     )

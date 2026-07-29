@@ -87,6 +87,22 @@ def test_significance_still_detects_a_genuine_edge():
     assert result["verdict"] == "significant"
 
 
+def test_significance_annualizes_over_bars_per_year_not_days_per_year():
+    """`observed_mean` is per bar, so a 4h route compounds 2,190 bars a year — not the
+    365 a flat days-per-year constant assumes, which understates it 6x."""
+    from terry.research.significance import _bars_per_year
+
+    assert _bars_per_year("1D") == 365
+    assert _bars_per_year("4h") == 2_190
+    assert _bars_per_year("1h") == 8_760
+    assert _bars_per_year("1m") == 525_600
+
+    result = _significance([100, 101] * 100)
+    assert result["bars_per_year"] == 525_600  # the fixture runs on a 1m route
+    assert result["annualized_return"] == pytest.approx(
+        result["observed_mean"] * 525_600)
+
+
 def _dataset(rows=1_000):
     return {"B-BTC-USDT": {
         "exchange": "B", "symbol": "BTC-USDT",
@@ -362,6 +378,8 @@ def test_rule_significance_session_runs_end_to_end(tmp_path: Path):
     assert result["verdict"] in {"significant", "borderline", "not_significant"}
     assert result["n_observations"] > 100
     assert result["n_simulations"] == 2_000
+    # A 15m route packs 35,040 candles into a 24/7 year.
+    assert result["bars_per_year"] == 35_040
     # The raw bootstrap samples stay out of the session payload.
     assert "simulated_means" not in result
 
@@ -370,6 +388,7 @@ def test_rule_significance_session_runs_end_to_end(tmp_path: Path):
     # Flags read as flags, and counts are not rendered with six decimal places.
     assert f"<td>{result['significant']}</td>" in report
     assert "<td>2,000</td>" in report
+    assert "<td>35,040</td>" in report
 
 
 if __name__ == "__main__":
