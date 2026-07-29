@@ -3,8 +3,9 @@ Rule Significance Testing — bootstrap test for whether an entry rule has a gen
 
 Method (ported from Jesse's research.rule_significance_testing):
   1. Signal-only backtest: record +1/-1/0 entry signal and close price at each bar.
-  2. Log returns r_t = ln(P_t / P_{t-1}); detrend by subtracting the mean.
-  3. rule_returns = signal * detrended  (neutral bars contribute 0).
+  2. Log returns r_t = ln(P_{t+1} / P_t); detrend by subtracting the mean.
+  3. rule_returns = signal_t * detrended_t  (neutral bars contribute 0), i.e. each
+     signal is scored on the bar that follows the close it was decided on.
   4. observed_mean = mean(rule_returns).
   5. Bootstrap: resample the zero-centred rule_returns N times, take each mean → null dist.
   6. p_value = fraction of simulated means >= observed_mean.  p<0.05 => significant edge.
@@ -46,8 +47,13 @@ def rule_significance_test(config, routes, data_routes, candles, warmup_candles=
     mask = np.isfinite(close_prices) & np.isfinite(signals)
     close_prices, signals = close_prices[mask], signals[mask]
 
+    # ``log_returns[t]`` is the move from bar t's close to bar t+1's close, and the
+    # signal stored at bar t was decided on that same close. Pairing a signal with the
+    # return that *preceded* it would leak look-ahead information and hand a perfect
+    # p-value to rules with no predictive power at all, so drop the final signal (it
+    # has no following bar) instead of the first.
     log_returns = np.log(close_prices[1:] / close_prices[:-1])
-    signals = signals[1:]
+    signals = signals[:-1]
     valid = np.isfinite(log_returns)
     log_returns, signals = log_returns[valid], signals[valid]
 

@@ -1,6 +1,7 @@
 """Optimization tools (draft → run → poll), with explicit out-of-sample validation."""
 from . import _common as c
 from ...context import get_context
+from ...research import OBJECTIVE_FUNCTIONS
 
 _EXAMPLE_ROUTES = ('[{"exchange": "Binance Perpetual Futures", '
                    '"strategy": "ExampleStrategy", "symbol": "BTC-USDT", '
@@ -61,12 +62,11 @@ def register_optimization_tools(mcp):
             return c._error(
                 "invalid_config", "cpu_cores must be an integer greater than 0.")
         resolved_objective = (objective or objective_function or "sharpe").lower()
-        if resolved_objective not in {
-                "sharpe", "sharpe_ratio", "calmar", "sortino", "omega",
-                "serenity", "smart sharpe", "smart sortino"}:
+        if resolved_objective not in OBJECTIVE_FUNCTIONS:
             return c._error(
                 "invalid_config",
-                f'Unsupported objective_function "{resolved_objective}".')
+                f'Unsupported objective_function "{resolved_objective}". '
+                f"Choose one of: {', '.join(sorted(OBJECTIVE_FUNCTIONS))}.")
         state.update({
             "objective_function": resolved_objective,
             "train_test_split": float(train_test_split),

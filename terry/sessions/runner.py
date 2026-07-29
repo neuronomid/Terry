@@ -622,6 +622,9 @@ class Runner:
             best_candidates_count=state.get("best_candidates_count", 20),
             fast_mode=state.get("fast_mode", True), cpu_cores=state.get("cpu_cores"),
             strategies_dir=self.ctx.strategies_dir,
+            # Sessions stream progress through the session store; a tqdm bar would
+            # only scribble on the MCP/dashboard process's stderr.
+            progress_bar=False,
             progress_callback=self._progress_cb(sid),
             should_cancel=self._should_cancel(sid), **kwargs)
         self.ctx.sessions.set_progress(sid, 100)

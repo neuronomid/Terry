@@ -51,6 +51,9 @@ A source-level review of Terry's four research backends against the current
   `signal · detrended` → bootstrap of zero-centred returns → `p = mean(sims ≥
   observed)`. Matches. **Fixed:** `annualized_return` annualized over 252 days;
   corrected to 365 to match Jesse's `TRADING_DAYS_PER_YEAR` (crypto trades 24/7).
+  **Fixed:** each signal is scored against the *following* bar's return. It was
+  paired with the return that preceded it, which leaked look-ahead information and
+  returned `p = 0` for rules with no predictive power whatsoever.
 
 ## Capability matrix
 

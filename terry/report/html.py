@@ -16,6 +16,18 @@ def _fmt(v, nd=2):
         return "—" if v is None else html.escape(str(v))
 
 
+def _stat(value):
+    """Render one significance-test statistic at a sane precision.
+
+    ``bool`` is a subclass of ``int``, so it is checked first — "significant: 1.00"
+    reads as a score rather than the verdict flag it is. Counts stay whole; the
+    p-value and mean bar return need six decimals to be readable at all.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return html.escape(str(value))
+    return _fmt(value, 0 if isinstance(value, int) else 6)
+
+
 def _metrics_table(metrics):
     if not metrics:
         return "<p>No metrics.</p>"
@@ -74,7 +86,7 @@ def _body_for_kind(kind, results):
     if kind == "significance_test":
         r = results.get("results", {})
         return ("<h2>Rule Significance Test</h2><table class='m'>"
-                + "".join(f"<tr><td>{k}</td><td>{_fmt(v) if isinstance(v,(int,float)) else html.escape(str(v))}</td></tr>"
+                + "".join(f"<tr><td>{k}</td><td>{_stat(v)}</td></tr>"
                           for k, v in r.items()) + "</table>")
     if kind == "monte_carlo":
         parts = ["<h2>Monte Carlo</h2>"]
@@ -102,8 +114,11 @@ def _body_for_kind(kind, results):
             parts.append(f"<p><b>Best hp:</b> {html.escape(json.dumps(best['hp']))} "
                          f"| train {_fmt(best.get('train_score'),3)} "
                          f"| test {_fmt(best.get('test_score'),3)}</p>")
+        candidates = results.get("candidates", [])
+        if not candidates and results.get("message"):
+            parts.append(f"<p>{html.escape(str(results['message']))}</p>")
         parts.append("<table class='t'><tr><th>#</th><th>hp</th><th>train</th><th>test</th></tr>")
-        for i, c in enumerate(results.get("candidates", []), 1):
+        for i, c in enumerate(candidates, 1):
             parts.append(f"<tr><td>{i}</td><td>{html.escape(json.dumps(c['hp']))}</td>"
                          f"<td>{_fmt(c.get('train_score'),3)}</td><td>{_fmt(c.get('test_score'),3)}</td></tr>")
         parts.append("</table>")

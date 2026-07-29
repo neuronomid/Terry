@@ -35,6 +35,9 @@ _FITNESS_RANGES = {
     # Terry's dashboard has historically offered this additional objective.
     "net_profit_percentage": (-0.5, 100),
 }
+#: Objective names :func:`optimize` accepts. The MCP and dashboard layers validate
+#: against this so a name can never be rejected at the edge yet supported by the engine.
+OBJECTIVE_FUNCTIONS = frozenset(_OBJECTIVES)
 
 
 def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = None,
@@ -91,7 +94,8 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
     if testing_candles is None:
         (training_candles, testing_candles,
          testing_warmup_candles) = _split_candles(
-            training_candles, train_test_split, routes, flat_config)
+            training_candles, train_test_split, routes, flat_config,
+            training_warmup_candles)
     total_trials = int(n_trials if n_trials is not None else trials * len(hp_space))
     if total_trials < 1:
         raise ValueError("trials must be at least 1")
@@ -175,8 +179,9 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
         detail = failures[0] if failures else "no trial result was produced"
         raise RuntimeError(f"All optimization trials failed. First error: {detail}")
     completed.sort(key=lambda item: item["fitness"], reverse=True)
-    selected = [item for item in completed if item["fitness"] > 0.0001]
-    selected = selected[:min(best_candidates_count, len(selected))]
+    qualified = [item for item in completed if item["fitness"] > 0.0001]
+    rejected = len(completed) - len(qualified)
+    selected = qualified[:min(best_candidates_count, len(qualified))]
     for rank, candidate in enumerate(selected, 1):
         testing_metrics = candidate["testing_metrics"]
         candidate.update({
@@ -191,11 +196,12 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
             "test_metrics": _slim(testing_metrics),
         })
 
-    return {
+    result = {
         "best_trials": selected,
         "total_trials": total_trials,
         "completed_trials": len(completed),
         "failed_trials": len(failures),
+        "rejected_trials": rejected,
         "trial_errors": failures[:10],
         "objective_function": objective_function,
         "objective": metric_key,
@@ -204,6 +210,16 @@ def optimize(config: dict, routes: list[dict], data_routes: list[dict] | None = 
         "candidates": selected,
         "cpu_cores": workers,
     }
+    if not selected:
+        # A run where every trial scored the floor is otherwise indistinguishable from
+        # a broken one: the session finishes "successfully" with an empty table.
+        result["message"] = (
+            f"No candidate cleared the fitness floor. All {len(completed)} completed "
+            f"trial(s) either closed {min_trades} trades or fewer, or scored a negative "
+            f"{objective_function}. Widen the hyperparameter ranges, lengthen the "
+            "training window, or lower min_trades/optimal_total."
+        )
+    return result
 
 
 def print_optimize_summary(result: dict, show_params: bool = False) -> None:
@@ -297,7 +313,7 @@ def _discover_hp(routes, strategies_dir, strategy_classes, strategy_sources):
     return cls().hyperparameters()
 
 
-def _split_candles(candles, ratio, routes, config):
+def _split_candles(candles, ratio, routes, config, warmup_candles=None):
     if not 0.1 < ratio < 0.9:
         raise ValueError("train_test_split must be greater than 0.1 and less than 0.9")
     training, testing, testing_warmup = {}, {}, {}
@@ -306,16 +322,31 @@ def _split_candles(candles, ratio, routes, config):
         from .. import helpers as jh
         timeframe_minutes = jh.timeframe_to_one_minutes(routes[0]["timeframe"])
     warmup_rows = int(config.get("warm_up_candles", 0) or 0) * timeframe_minutes
+    if not warmup_rows and warmup_candles:
+        # Callers that already resolved warm-up into explicit candles (Terry's session
+        # runner) zero ``warm_up_candles`` so the engine does not reserve it twice.
+        # Without mirroring that length here the testing window would start its
+        # indicators cold while the training window ran fully warmed up, making the
+        # out-of-sample scores incomparable to the in-sample ones.
+        warmup_rows = min(len(np.asarray(value["candles"]))
+                          for value in warmup_candles.values())
+    splits = {}
     for key, value in candles.items():
         array = np.asarray(value["candles"])
         split = int(len(array) * ratio)
         if split < 2 or len(array) - split < 2:
             raise ValueError("train_test_split produces an insufficient train or test window")
-        training[key] = {**value, "candles": array[:split]}
-        testing[key] = {**value, "candles": array[split:]}
+        splits[key] = (array, split)
+    # Every feed must contribute the same number of warm-up rows: the simulator walks
+    # one shared 1m index across routes, so unequal injections would desynchronise them.
+    if warmup_rows:
+        warmup_rows = min([warmup_rows, *(split for _, split in splits.values())])
+    for key, (array, split) in splits.items():
+        training[key] = {**candles[key], "candles": array[:split]}
+        testing[key] = {**candles[key], "candles": array[split:]}
         if warmup_rows:
             testing_warmup[key] = {
-                **value, "candles": array[max(0, split - warmup_rows):split],
+                **candles[key], "candles": array[split - warmup_rows:split],
             }
     return training, testing, testing_warmup or None
 

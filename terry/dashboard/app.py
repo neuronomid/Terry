@@ -31,6 +31,7 @@ from .. import helpers as jh
 from ..context import TerryContext, set_context
 from ..data.binance import EXCHANGES
 from ..loader import load_strategy_class, strategy_exists
+from ..research import OBJECTIVE_FUNCTIONS
 from ..sessions.db import TERMINAL, VALID_KINDS
 from ..version import __version__
 
@@ -38,11 +39,7 @@ _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
 _SYMBOL = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 _STATIC = Path(__file__).with_name("static")
 _AUTH_COOKIE = "terry_dashboard_session"
-_OBJECTIVES = {
-    "sharpe", "sharpe_ratio", "sortino", "sortino_ratio", "calmar", "calmar_ratio",
-    "omega", "omega_ratio", "serenity", "serenity_index", "smart sharpe",
-    "smart sortino", "net_profit_percentage",
-}
+_OBJECTIVES = OBJECTIVE_FUNCTIONS
 _SESSION_KINDS = ("backtest", "demo", "optimization", "monte_carlo", "significance_test")
 _PIPELINE_TYPES = {"moving_block_bootstrap", "gaussian_noise", "gaussian_resampler"}
 _ENGINE_CONFIG_KEYS = {
@@ -598,16 +595,27 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
         raise _error(422, "Rule significance testing requires exactly one trading route.")
     if "cpu_cores" in payload:
         state["cpu_cores"] = _integer(payload["cpu_cores"], "cpu_cores", 1)
+    # A field the caller omits falls back to the project's saved research defaults
+    # (the ones `get_optimization_config`/`GET /api/config` report), not to a literal.
+    saved = ctx.config.get()
     if kind == "significance_test":
-        simulations = _integer(payload.get("n_simulations", 2_000), "n_simulations", 2_000)
+        defaults = saved.get("significance_test") or {}
+        simulations = _integer(
+            payload.get("n_simulations", defaults.get("n_simulations", 2_000)),
+            "n_simulations", 2_000)
         state.update({"n_simulations": simulations, "hypothesis": str(payload.get("hypothesis") or ""),
                       "rationale": str(payload.get("rationale") or "")})
         if "random_seed" in payload:
             state["random_seed"] = _integer(payload["random_seed"], "random_seed")
     elif kind == "monte_carlo":
-        scenarios = _integer(payload.get("num_scenarios", 200), "num_scenarios", 1)
-        run_candles = _boolean(payload.get("run_candles", True), "run_candles")
-        run_trades = _boolean(payload.get("run_trades", False), "run_trades")
+        defaults = saved.get("monte_carlo") or {}
+        scenarios = _integer(
+            payload.get("num_scenarios", defaults.get("num_scenarios", 200)),
+            "num_scenarios", 1)
+        run_candles = _boolean(
+            payload.get("run_candles", defaults.get("run_candles", True)), "run_candles")
+        run_trades = _boolean(
+            payload.get("run_trades", defaults.get("run_trades", False)), "run_trades")
         if not run_candles and not run_trades:
             raise _error(422, "Enable candle resampling, trade-order shuffling, or both.")
         pipeline_type = str(payload.get("pipeline_type", "moving_block_bootstrap"))
@@ -638,11 +646,15 @@ def _new_session(ctx: TerryContext, kind: str, payload: dict[str, Any]) -> dict[
                       "pipeline_type": pipeline_type,
                       "pipeline_params": pipeline_params})
     elif kind == "optimization":
-        trials = _integer(payload.get("n_trials", 100), "n_trials", 1)
-        split = _number(payload.get("train_test_split", 0.75), "train_test_split", 0.1, exclusive=True)
+        defaults = saved.get("optimization") or {}
+        trials = _integer(payload.get("n_trials", defaults.get("n_trials", 100)),
+                          "n_trials", 1)
+        split = _number(
+            payload.get("train_test_split", defaults.get("train_test_split", 0.75)),
+            "train_test_split", 0.1, exclusive=True)
         if split >= 0.9:
             raise _error(422, "train_test_split must be greater than 0.1 and less than 0.9.")
-        objective = str(payload.get("objective", "sharpe_ratio"))
+        objective = str(payload.get("objective", defaults.get("objective", "sharpe_ratio")))
         if objective not in _OBJECTIVES:
             raise _error(422, f"objective must be one of: {', '.join(sorted(_OBJECTIVES))}.")
         state.update({"objective": objective, "n_trials": trials,
