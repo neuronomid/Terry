@@ -258,20 +258,26 @@ def monte_carlo_trades(
         # point per trade is mathematically sufficient and avoids duplicating a
         # minute-level curve across hundreds of scenarios.
         original_points = _equity_from_trades(trades, balance)
+        # Every scenario is measured on that per-trade path, so the original has to be
+        # measured on it too. ``raw_original["metrics"]`` is the engine's daily-balance
+        # view: its Sharpe and drawdown are different statistics on a different sampling
+        # grid, and ranking one against the other reports a scale artefact as a verdict.
+        # The engine metrics stay untouched on ``original["metrics"]`` for callers.
+        original_basis = _trade_metrics(original_points, balance)
     else:
         trades = list(config)
         balance = float(10_000 if starting_balance is None else starting_balance)
         if not trades:
             return _empty_trade_result(num_scenarios)
         original_points = _equity_from_trades(trades, balance)
-        original_scenario_metrics = _trade_metrics(original_points, balance)
+        original_basis = _trade_metrics(original_points, balance)
         original = {
             "scenario_index": 0,
             "metrics": {
-                "net_profit_percentage": original_scenario_metrics["total_return"],
-                "max_drawdown": original_scenario_metrics["max_drawdown"],
-                "sharpe_ratio": original_scenario_metrics["sharpe_ratio"],
-                "calmar_ratio": original_scenario_metrics["calmar_ratio"],
+                "net_profit_percentage": original_basis["total_return"],
+                "max_drawdown": original_basis["max_drawdown"],
+                "sharpe_ratio": original_basis["sharpe_ratio"],
+                "calmar_ratio": original_basis["calmar_ratio"],
             },
             "trades": trades,
             "equity_curve": _series_equity(original_points),
@@ -303,9 +309,11 @@ def monte_carlo_trades(
         progress.close()
 
     scenarios.sort(key=lambda item: item["scenario_index"])
-    confidence = _trade_confidence(original, scenarios)
+    confidence = _trade_confidence(original_basis, scenarios)
     drawdowns = np.asarray([scenario["max_drawdown"] for scenario in scenarios])
-    drawdown_summary = {"original": _num(original.get("metrics", {}).get("max_drawdown"))}
+    # Same basis as the percentiles beside it — this is the one number the trade-shuffling
+    # mode is meant to be read for, so it must not be the daily-balance drawdown.
+    drawdown_summary = {"original": _num(original_basis["max_drawdown"])}
     for name, percentile in PERCENTILES.items():
         drawdown_summary[name] = float(np.percentile(drawdowns, percentile))
     return {
@@ -400,6 +408,15 @@ def _trade_pnl(trade) -> float:
 
 
 def _trade_metrics(points, starting_balance) -> dict:
+    """Metrics for one per-trade equity path (one point per closed trade).
+
+    ``volatility`` and ``sharpe_ratio`` scale by 365/√365, which would only be a true
+    annualization if the strategy closed one trade a day. They are kept that way on
+    purpose: under trade shuffling these are read as a *distribution* — the original
+    against its own permutations — and a shared scale factor cancels out of every rank
+    and percentile. What matters is that both sides come through this function, not
+    what the constant is. Do not read them as standalone annualized figures.
+    """
     values = np.asarray([point["value"] for point in points], dtype=float)
     if len(values) == 0:
         raise ValueError("Cannot calculate Monte Carlo metrics without an equity curve.")
@@ -512,18 +529,18 @@ def _confidence_analysis(original_metrics, scenario_metrics, keys):
     }
 
 
-def _trade_confidence(original, scenarios):
-    original_metrics = original.get("metrics", {})
-    normalized_original = {
-        "total_return": original_metrics.get("net_profit_percentage", 0),
-        "max_drawdown": original_metrics.get("max_drawdown", 0),
-        "sharpe_ratio": original_metrics.get("sharpe_ratio", 0),
-        "calmar_ratio": original_metrics.get("calmar_ratio", 0),
-    }
+def _trade_confidence(original_basis, scenarios):
+    """Rank the original against the scenarios on the shared per-trade equity basis.
+
+    ``total_return`` is deliberately excluded. Shuffling a fixed set of trades cannot
+    change the sum of their PNL, so every scenario finishes at the identical balance;
+    the resulting "distribution" is a single point and any rank or p-value over it is
+    an artefact rather than evidence. Only path-dependent metrics survive shuffling.
+    """
     return _confidence_analysis(
-        normalized_original,
+        original_basis,
         scenarios,
-        ["total_return", "max_drawdown", "sharpe_ratio", "calmar_ratio"],
+        ["max_drawdown", "sharpe_ratio", "calmar_ratio"],
     )
 
 

@@ -47,6 +47,15 @@ A source-level review of Terry's four research backends against the current
   with 365-day annualization, base seed 42, and the same 2.5/5/25/75/95/97.5
   confidence intervals. Candle pipelines (moving-block bootstrap, gaussian noise,
   gaussian resampler) were ported from Jesse with the same defaults. Matches.
+  **Fixed (trade shuffling):** the original was ranked against the scenarios using the
+  engine's daily-balance metrics while the scenarios were measured on a per-trade
+  equity path — two different statistics on two different sampling grids, so the
+  reported drawdown percentile and every `confidence_analysis` verdict were sampling
+  artefacts. Both sides now come through `_trade_metrics`. `total_return` was also
+  dropped from that analysis: permuting a fixed set of trades cannot change the sum of
+  their PNL, so its "distribution" is a single point. The 365/√365 scale inside
+  `_trade_metrics` is deliberately left alone — it cancels out of every rank and
+  percentile, which is the only way those numbers are read in this mode.
 - **Rule significance** — signal-only pass → log returns → detrend →
   `signal · detrended` → bootstrap of zero-centred returns → `p = mean(sims ≥
   observed)`. Matches. **Fixed:** `annualized_return` annualized over 252 days;

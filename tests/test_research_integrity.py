@@ -1,8 +1,9 @@
-"""Statistical-integrity coverage for the Optimization and Rule Significance Test paths.
+"""Statistical-integrity coverage for Terry's research surface.
 
-These guard the two properties the research surface exists to provide: a rule is only
-ever scored on bars it could actually have traded, and out-of-sample validation runs
-under the same conditions as the training window it is compared against.
+These guard the properties the research tools exist to provide: a rule is only ever
+scored on bars it could actually have traded, out-of-sample validation runs under the
+same conditions as the training window it is compared against, and a result is only
+ranked against a distribution measured the same way it was.
 """
 from __future__ import annotations
 
@@ -260,6 +261,74 @@ def test_dashboard_research_defaults_follow_the_saved_config(tmp_path: Path):
     explicit = client.post("/api/sessions/optimization",
                            json={**common, "n_trials": 3})
     assert explicit.json()["state"]["n_trials"] == 3
+
+
+class Churn(Strategy):
+    """Opens and closes on a fixed cadence so a run yields plenty of closed trades."""
+
+    def should_long(self):
+        return self.index % 8 == 0
+
+    def should_short(self):
+        return False
+
+    def go_long(self):
+        from terry import utils
+        self.buy = utils.size_to_qty(
+            self.available_margin * 0.2, self.price, fee_rate=self.fee_rate), self.price
+
+    def update_position(self):
+        if self.index % 8 == 4:
+            self.liquidate()
+
+
+def _shuffled_trades_result(num_scenarios=20):
+    from terry.research.monte_carlo import monte_carlo_trades
+
+    rng = np.random.default_rng(5)
+    prices = 100 * np.exp(np.cumsum(rng.normal(0.00002, 0.0015, 2_000)))
+    dataset = {"B-BTC-USDT": {
+        "exchange": "B", "symbol": "BTC-USDT",
+        "candles": candles_from_close_prices(prices.tolist()),
+    }}
+    return monte_carlo_trades(
+        {**CONFIG, "fee": 0.0006},
+        [{**ROUTE[0], "strategy": "Churn"}], [], dataset,
+        num_scenarios=num_scenarios, strategy_classes={"Churn": Churn},
+        progress_bar=False, cpu_cores=2)
+
+
+def test_trade_shuffling_ranks_the_original_on_the_scenarios_own_basis():
+    """Scenarios are measured on a per-trade equity path. The original must be too —
+    ranking the engine's daily-balance drawdown against per-trade drawdowns reports a
+    sampling artefact as a verdict."""
+    result = _shuffled_trades_result()
+    scenario_drawdowns = [s["max_drawdown"] for s in result["scenarios"]]
+    reported = result["max_drawdown"]["original"]
+
+    # The original is one permutation of its own trades, so it belongs inside the
+    # distribution its percentiles describe.
+    assert min(scenario_drawdowns) <= reported <= max(scenario_drawdowns)
+    assert result["max_drawdown"]["worst_5"] <= reported <= result["max_drawdown"]["best_5"]
+
+    # The engine's daily-balance metrics survive untouched for callers that want them,
+    # and are a genuinely different number — which is exactly why they can't be ranked.
+    engine = result["original"]["metrics"]
+    assert engine["sharpe_ratio"] != pytest.approx(result["scenarios"][0]["sharpe_ratio"])
+    assert engine["max_drawdown"] != pytest.approx(reported)
+
+
+def test_trade_shuffling_drops_the_permutation_invariant_total_return():
+    """Reordering a fixed set of trades cannot change the sum of their PNL, so every
+    scenario ends at the same balance. A p-value over that is an artefact."""
+    result = _shuffled_trades_result()
+    totals = {round(s["total_return"], 10) for s in result["scenarios"]}
+    assert len(totals) == 1, "total_return is not invariant — revisit this assumption"
+
+    analyzed = result["confidence_analysis"]["metrics"]
+    assert "total_return" not in analyzed
+    assert set(analyzed) == {"max_drawdown", "sharpe_ratio", "calmar_ratio"}
+    assert result["confidence_analysis"]["summary"]["total_metrics"] == 3
 
 
 TUNED_SOURCE = '''from terry.strategies import Strategy
